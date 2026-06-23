@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # -------------------------------------------------------------
+  # Head Node (분산 시스템 글로벌 제어기)
+  # -------------------------------------------------------------
+  babyray-head:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: babyray-head
+    command: python -u head/main.py
+    ports:
+      - "50051:50051"
+    networks:
+      - babyray-net
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+
+  # -------------------------------------------------------------
+  # Worker 1 Node (가상 고성능 노드 - A100급 성능 모사)
+  # -------------------------------------------------------------
+  babyray-worker-1:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: babyray-worker-1
+    command: python -u worker/main.py --id worker-1 --port 50052 --gpu-scale 1.0 --threads 2
+    ports:
+      - "50052:50052"
+    networks:
+      - babyray-net
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    depends_on:
+      - babyray-head
+    # cGroup 자원 격리 (CPU 2.0 Cores, Memory 2GB 제한)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2000M
+        # NVIDIA GPU 연동 (RTX 4060 Laptop GPU 자원 패스스루)
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # -------------------------------------------------------------
+  # Worker 2 Node (가상 저성능 노드 - T4급 성능 모사)
+  # -------------------------------------------------------------
+  babyray-worker-2:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: babyray-worker-2
+    command: python -u worker/main.py --id worker-2 --port 50053 --gpu-scale 0.3 --threads 1
+    ports:
+      - "50053:50053"
+    networks:
+      - babyray-net
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    depends_on:
+      - babyray-head
+    # cGroup 자원 격리 (CPU 0.5 Cores, Memory 512MB 제한 - Straggler 유도)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        # NVIDIA GPU 연동 (RTX 4060 Laptop GPU 자원 패스스루)
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+networks:
+  babyray-net:
+    name: babyray-net
+    driver: bridge

@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package babyray;
+
+// Baby Ray 분산 시스템 핵심 서비스 정의
+service BabyRayService {
+  // 1. Worker -> Head: Worker 기동 시 최초 등록 요청
+  rpc RegisterWorker (RegisterRequest) returns (RegisterResponse);
+
+  // 2. Worker -> Head: 생존 신호 및 실시간 CPU/Memory 메트릭 전송 (Heartbeat)
+  rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // 3. Head -> Worker: AI 학습 태스크 배정 요청
+  rpc AssignTask (TaskRequest) returns (TaskResponse);
+
+  // 4. Head -> Worker: 실행 중인 태스크 상태 확인 (Polling)
+  rpc GetTaskStatus (TaskStatusRequest) returns (TaskStatusResponse);
+}
+
+// -------------------------------------------------------------
+// 메시지 스펙 정의
+
+// 1. Worker 등록 요청/응답
+message RegisterRequest {
+  string worker_id = 1;       // 예: "worker-node-1"
+  string worker_ip = 2;       // 예: "172.20.0.3"
+  int32 worker_port = 3;      // 예: 50052
+  double total_cpu_cores = 4; // cGroup에 할당된 총 CPU 코어 수
+  int64 total_memory_bytes = 5; // cGroup에 할당된 총 메모리 제한 (Bytes)
+}
+
+message RegisterResponse {
+  bool success = 1;           // 등록 성공 여부
+  string message = 2;         // 성공/오류 메시지
+}
+
+// 2. Heartbeat 요청/응답
+message HeartbeatRequest {
+  string worker_id = 1;
+  double cpu_usage_percent = 2; // 실시간 CPU 사용량 (%)
+  double memory_used_bytes = 3;  // 실시간 메모리 사용량 (Bytes)
+  int64 timestamp = 4;          // Epoch Unix 밀리초
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;        // 수신 확인 완료 플래그
+  string command = 2;           // 제어 명령 지시 (예: "ABORT", "SHUTDOWN", "NONE")
+}
+
+// 3. Task 할당 요청/응답
+message TaskRequest {
+  string task_id = 1;           // 고유 태스크 UUID
+  string task_name = 2;         // 태스크 명칭
+  
+  // LSTM 학습용 하이퍼파라미터
+  int32 sequence_length = 3;    // 시퀀스 길이 (예: 50)
+  int32 hidden_dim = 4;         // LSTM 은닉 차원 (예: 128)
+  int32 epochs = 5;             // 학습 에포크 수
+  double learning_rate = 6;     // 학습률
+  
+  // 컨테이너 내 실행 하드웨어 조율 인자
+  int32 thread_limit = 7;       // torch.set_num_threads 한도
+  double gpu_scale_factor = 8;   // 가상 GPU 성능 모사용 스케일 (1.0 = 무지연, 0.3 = 70% 지연 유도)
+  
+  // 데이터 지역성 및 작업 의존성 정보 (Object Store 경로)
+  repeated string dependency_object_ids = 9; // 이 태스크에 입력으로 필요한 이전 객체 ID 목록
+}
+
+message TaskResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// 4. Task 상태 확인 요청/응답
+message TaskStatusRequest {
+  string task_id = 1;
+}
+
+message TaskStatusResponse {
+  string task_id = 1;
+  string status = 2;            // PENDING, RUNNING, SUCCESS, FAILED
+  double progress = 3;          // 진행률 (0.0 ~ 1.0)
+  float loss = 4;               // 현재/최종 학습 loss 수치
+}

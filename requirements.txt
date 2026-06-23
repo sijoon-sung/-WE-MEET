@@ -15,8 +15,6 @@ matplotlib>=3.8.0
 numpy>=1.26.0
 
 # 4. PyTorch (AI 연산 워크로드 구동용)
-# [참고] Docker 컨테이너 내부에서는 'pytorch/pytorch' CUDA 베이스 이미지를 사용할 경우 
-# PyTorch가 이미 내장되어 있으므로 따로 빌드할 필요가 없습니다. 
-# 로컬 개발 환경(호스트 PC)에서의 자동 완성 및 스크립트 정적 분석용으로만 설치를 권장합니다.
-# (호스트 PC에 CUDA 가속 버전을 설치하려면 아래 주석을 풀고 설치 가이드를 참조하세요)
-# torch
+# Docker 컨테이너 내부에서는 'pytorch/pytorch' CUDA 베이스 이미지를 사용할 경우
+# PyTorch가 이미 내장되어 있으므로 따로 빌드할 필요가 없음
+torch

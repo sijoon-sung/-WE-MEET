@@ -38,9 +38,3 @@
   - `torch` (CUDA 가속 AI 연산 및 스레드 조율)
   - `pandas`, `matplotlib` (벤치마크 결과 그래프 시각화)
 
----
-
-## 📁 주요 문서 링크
-* [수행 계획서 (팀 & 개인 통합본)](file:///c:/Users/win/Desktop/클라우드%20%20WE-MEET%20프로젝트/WE-MEET/project_proposal.md): 프로젝트 추진 배경, 주차별 마일스톤 및 상세 구현 계획서
-* [API 규격 명세서](file:///c:/Users/win/Desktop/클라우드%20%20WE-MEET%20프로젝트/WE-MEET/api_specification.md): Head-Worker 간 gRPC 프로토콜 및 Protobuf 데이터 명세
-* [1주차 정리 노트](file:///c:/Users/win/Desktop/클라우드%20%20WE-MEET%20프로젝트/WE-MEET/week1_study_notes.md): gRPC 기본 이론 및 Python 빌드 가이드

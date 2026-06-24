@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package babyray;
+
+service BabyRayService {
+  // Worker -> Head: Worker 등록 및 제거
+  rpc RegisterWorker (RegisterRequest) returns (RegisterResponse);
+  rpc DeregisterWorker (DeregisterRequest) returns (DeregisterResponse);
+
+  // Worker -> Head: 주기적 생존 신고 및 자원 상태 전송
+  rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Head -> Worker: 작업 할당 및 상태 모니터링
+  rpc AssignTask (TaskAssignment) returns (TaskResult);
+  rpc GetTaskStatus (TaskStatusRequest) returns (TaskStatusResponse);
+
+  // Head -> Worker: cGroup 자원 격리 제한 동적 변경
+  rpc ResizeResources (ResizeRequest) returns (ResizeResponse);
+}
+
+message RegisterRequest {
+  string worker_id = 1;
+  string node_type = 2; // on_demand, spot_a, spot_b
+  int32 port = 3;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message DeregisterRequest {
+  string worker_id = 1;
+}
+
+message DeregisterResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  float cpu_utilization = 2;
+  float memory_utilization = 3;
+}
+
+message HeartbeatResponse {
+  bool ack = 1;
+}
+
+message TaskAssignment {
+  string task_id = 1;
+  string model_type = 2; // CNN, RNN, LSTM
+  string dataset_path = 3;
+  int32 epochs = 4;
+}
+
+message TaskResult {
+  string task_id = 1;
+  string status = 2; // SUCCESS, FAILED
+  float execution_time = 3;
+  string message = 4;
+}
+
+message TaskStatusRequest {
+  string task_id = 1;
+}
+
+message TaskStatusResponse {
+  string status = 1; // RUNNING, COMPLETED, FAILED
+  float progress = 2; // 0.0 ~ 100.0(진행률)
+  string logs = 3;
+}
+
+message ResizeRequest {
+  float cpu_cores = 1; // CPU 코어의 수
+  int64 memory_bytes = 2; // MEMORY 2GB
+}
+
+message ResizeResponse {
+  bool success = 1; 
+  string message = 2;
+}

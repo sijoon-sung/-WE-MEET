@@ -1,48 +1,199 @@
 import grpc
 import sys
 import os
+import time
+import argparse
+import threading
+from concurrent import futures
 
 # 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가하여 proto 패키지를 정상적으로 찾을 수 있도록 설정합니다.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
+from common.config import DEFAULT_HEARTBEAT_INTERVAL
 
-def test_connection():
-    head_address = "localhost:50051"
-    print(f"[Worker Client] Head 노드 연결 중: {head_address}...")
+# --- 1. 가상 작업 실행기 (Mock Task Runner) ---
+
+class MockTaskRunner:
+    """단순 sleep을 활용해 에포크 단위로 AI 모델 학습 연산을 모사하는 클래스"""
+    def __init__(self, task_id, model_type, epochs):
+        self.task_id = task_id
+        self.model_type = model_type
+        self.epochs = epochs
+        self.progress = 0.0
+        self.status = "RUNNING"
+        self.logs = []
+        self.execution_time = 0.0
+
+    def run(self):
+        print(f"\n[Worker Task] 작업 실행 시작: Task ID={self.task_id} (유형: {self.model_type}, Epochs: {self.epochs})")
+        start_time = time.time()
+        
+        # 1에포크당 1초씩 소요되는 가상 학습 루프
+        for epoch in range(self.epochs):
+            time.sleep(1.0)
+            loss = 1.0 / (epoch + 1) + 0.05
+            log_line = f"Epoch {epoch+1}/{self.epochs} - Loss: {loss:.4f} - Accuracy: {75 + epoch*3}%"
+            self.logs.append(log_line)
+            print(f"[Worker Task] {self.task_id} | {log_line}")
+            
+            # 진행률 업데이트 (0.0 ~ 100.0)
+            self.progress = ((epoch + 1) / self.epochs) * 100.0
+            
+        self.execution_time = time.time() - start_time
+        self.status = "SUCCESS"
+        print(f"[Worker Task] 작업 완료: {self.task_id} (총 소요 시간: {self.execution_time:.2f}초)\n")
+
+
+# --- 2. Worker gRPC 서비스 서버 구현 ---
+
+class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
+    def __init__(self):
+        self.current_task_id = None
+        self.runner = None
+        self.lock = threading.Lock()
+
+    def AssignTask(self, request, context):
+        with self.lock:
+            # 1. 이미 작업이 구동 중인지 중복 검사
+            if self.current_task_id is not None and self.runner.status == "RUNNING":
+                print(f"[Worker gRPC] 작업 거절: {request.task_id} (이유: 다른 작업 실행 중)")
+                return babyray_pb2.TaskResult(
+                    task_id=request.task_id,
+                    status="FAILED",
+                    execution_time=0.0,
+                    message="Another task is already running on this worker."
+                )
+            
+            # 2. 신규 가상 작업 생성
+            self.current_task_id = request.task_id
+            self.runner = MockTaskRunner(
+                task_id=request.task_id,
+                model_type=request.model_type,
+                epochs=request.epochs
+            )
+            
+            # 3. 백그라운드 스레드에서 연산 실행
+            threading.Thread(target=self.runner.run, daemon=True).start()
+            
+            print(f"[Worker gRPC] 작업 접수 승인: {request.task_id}")
+            return babyray_pb2.TaskResult(
+                task_id=request.task_id,
+                status="RUNNING",
+                execution_time=0.0,
+                message="Task assigned successfully, executing in background."
+            )
+
+    def GetTaskStatus(self, request, context):
+        with self.lock:
+            if self.runner is None or self.runner.task_id != request.task_id:
+                return babyray_pb2.TaskStatusResponse(
+                    status="NOT_FOUND",
+                    progress=0.0,
+                    logs="No such task found on this worker."
+                )
+            
+            return babyray_pb2.TaskStatusResponse(
+                status=self.runner.status,
+                progress=self.runner.progress,
+                logs="\n".join(self.runner.logs)
+            )
+
+    def ResizeResources(self, request, context):
+        print(f"[Worker gRPC] 자원 크기 조절 요청 수신: CPU={request.cpu_cores} Cores, Mem={request.memory_bytes} Bytes")
+        return babyray_pb2.ResizeResponse(
+            success=True,
+            message=f"Configured worker cGroups: CPU={request.cpu_cores}, Mem={request.memory_bytes}"
+        )
+
+
+# --- 3. 하트비트 송신 클라이언트 루프 (Head로 전송) ---
+
+def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
+    time.sleep(1.0) # Worker 자체 gRPC 서버가 부팅될 때까지 1초 대기
+    
+    head_address = f"{head_host}:{head_port}"
+    print(f"[Heartbeat] Head 서버 연결 시도: {head_address}...")
+    
+    channel = grpc.insecure_channel(head_address)
+    stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
+    
+    # 1. Head 서버에 워커 등록 요청
+    registered = False
+    while not registered:
+        try:
+            response = stub.RegisterWorker(babyray_pb2.RegisterRequest(
+                worker_id=worker_id,
+                node_type=node_type,
+                port=port
+            ))
+            if response.success:
+                print(f"[Heartbeat] Head 서버 등록 완료: {response.message}")
+                registered = True
+            else:
+                print(f"[Heartbeat] 등록 거절됨. 3초 후 재시도...")
+                time.sleep(3)
+        except grpc.RpcError:
+            print(f"[Heartbeat] Head 서버 연결 지연. 3초 후 재시도...")
+            time.sleep(3)
+            
+    # 2. 주기적 생존 신고 및 상태 리포트
+    while True:
+        try:
+            # 더미 자원 수치 송신
+            stub.SendHeartbeat(babyray_pb2.HeartbeatRequest(
+                worker_id=worker_id,
+                cpu_utilization=12.5,
+                memory_utilization=40.0
+            ))
+        except grpc.RpcError:
+            print(f"[Heartbeat] 경고: 생존 신고 전송 실패 (Head 연결이 끊겼습니다)")
+            
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+
+
+# --- 4. Worker 메인 구동 루프 ---
+
+def serve(worker_id, node_type, port, head_host, head_port):
+    # 1. Head의 명령을 수신받을 Worker 자체 gRPC 서버 실행
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=3))
+    servicer = BabyRayWorkerServicer()
+    babyray_pb2_grpc.add_BabyRayServiceServicer_to_server(servicer, server)
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    print(f"=== [Worker] '{worker_id}' gRPC 서버 활성화 (포트: {port}) ===")
+    
+    # 2. Head에 하트비트를 보내는 클라이언트 스레드 가동
+    hb_thread = threading.Thread(
+        target=heartbeat_sender_loop,
+        args=(worker_id, node_type, port, head_host, head_port),
+        daemon=True
+    )
+    hb_thread.start()
     
     try:
-        # gRPC 채널 생성
-        channel = grpc.insecure_channel(head_address)
-        stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
-        
-        # 1. RegisterWorker RPC 테스트 (1회성 동기식 호출)
-        print("[Worker Client] 1. RegisterWorker 요청 송신...")
-        reg_response = stub.RegisterWorker(babyray_pb2.RegisterRequest(
-            worker_id="test-worker-01",
-            node_type="on_demand",
-            port=50052
-        ))
-        print(f"[Worker Client] 1. 응답 성공! 결과: success={reg_response.success}, message='{reg_response.message}'")
-        
-        # 2. SendHeartbeat RPC 테스트 (1회성 동기식 호출)
-        print("[Worker Client] 2. SendHeartbeat 요청 송신...")
-        hb_response = stub.SendHeartbeat(babyray_pb2.HeartbeatRequest(
-            worker_id="test-worker-01",
-            cpu_utilization=15.4,
-            memory_utilization=48.2
-        ))
-        print(f"[Worker Client] 2. 응답 성공! 결과: ack={hb_response.ack}")
-        
-        print("\n=== [Worker Client] gRPC 연결 체크 실험 성공! ===")
-        
-    except grpc.RpcError as e:
-        print(f"\n[Worker Client] gRPC 에러 발생: {e.code()} - {e.details()}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n[Worker Client] 예외 발생: {e}")
-        sys.exit(1)
+        while True:
+            time.sleep(86400)
+    except KeyboardInterrupt:
+        print(f"\n[Worker] '{worker_id}' 종료 중...")
+        try:
+            # 종료 시 GCS 해제 요청
+            channel = grpc.insecure_channel(f"{head_host}:{head_port}")
+            stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
+            stub.DeregisterWorker(babyray_pb2.DeregisterRequest(worker_id=worker_id))
+        except Exception:
+            pass
+        server.stop(0)
 
-if __name__ == "__main__":
-    test_connection()
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="BabyRay Worker Node")
+    parser.add_argument("--id", type=str, default="worker-01", help="Worker ID")
+    parser.add_argument("--type", type=str, default="on_demand", help="Worker Type")
+    parser.add_argument("--port", type=int, default=50052, help="Worker listening port")
+    parser.add_argument("--head-host", type=str, default="localhost", help="Head node IP/Host")
+    parser.add_argument("--head-port", type=int, default=50051, help="Head node port")
+    
+    args = parser.parse_args()
+    serve(args.id, args.type, args.port, args.head_host, args.head_port)

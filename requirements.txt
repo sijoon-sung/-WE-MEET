@@ -4,6 +4,7 @@
 
 # 1. gRPC 통신망 구축용 (사전 컴파일된 프로토 파일 사용하므로 컴파일러 도구 불필요)
 grpcio>=1.60.0
+grpcio-tools>=1.60.0
 
 # 2. Worker 노드 자원(CPU, Memory) 실시간 모니터링 및 Docker SDK 제어용
 psutil>=5.9.0

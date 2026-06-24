@@ -1,0 +1,74 @@
+version: '3.8'
+
+networks:
+  babyray-net:
+    driver: bridge
+
+services:
+  # GCS 및 Q-learning 스케줄러를 구동하는 Head 관리 노드
+  head:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: babyray-image:latest
+    container_name: babyray-head
+    command: python -m head.head
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # 호스트 Docker 데몬 연동
+    ports:
+      - "50051:50051" # gRPC 포트
+    networks:
+      - babyray-net
+    environment:
+      - NODE_TYPE=head
+      - PYTHONUNBUFFERED=1
+
+  # On-Demand 노드 (2 Cores, 2GB Memory, GPU 1.0 배율)
+  worker-1:
+    image: babyray-image:latest
+    container_name: babyray-worker-1
+    depends_on:
+      - head
+    command: python -m worker.worker --id worker-1 --type on_demand --port 50052
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - babyray-net
+    environment:
+      - NODE_TYPE=on_demand
+      - HEAD_HOST=head
+      - HEAD_PORT=50051
+      - PYTHONUNBUFFERED=1
+
+  # Spot-A 노드 (1 Core, 1GB Memory, GPU 0.6 배율)
+  worker-2:
+    image: babyray-image:latest
+    container_name: babyray-worker-2
+    depends_on:
+      - head
+    command: python -m worker.worker --id worker-2 --type spot_a --port 50053
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - babyray-net
+    environment:
+      - NODE_TYPE=spot_a
+      - HEAD_HOST=head
+      - HEAD_PORT=50051
+      - PYTHONUNBUFFERED=1

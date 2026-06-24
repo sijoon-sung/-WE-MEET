@@ -3,6 +3,7 @@ syntax = "proto3";
 package babyray;
 
 service BabyRayService {
+
   // Worker -> Head: Worker 등록 및 제거
   rpc RegisterWorker (RegisterRequest) returns (RegisterResponse);
   rpc DeregisterWorker (DeregisterRequest) returns (DeregisterResponse);

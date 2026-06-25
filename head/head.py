@@ -15,6 +15,7 @@ from common.config import DEFAULT_HEAD_PORT
 # 워커 관리용 인메모리 레지스트리
 # worker_id -> { "node_type": str, "ip": str, "port": int, "last_heartbeat": float, "cpu": float, "mem": float, "status": str }
 worker_registry = {}
+# 동시 접근을 막기 위해 Lock 사용.
 registry_lock = threading.Lock()
 
 # 할당할 작업 번호 생성기
@@ -148,7 +149,7 @@ def scheduler_loop():
                     dead_workers.append(wid)
                     
             for wid in dead_workers:
-                print(f"[Scheduler GCS] ☠️ 워커 오프라인 감지(15초 초과): 워커 '{wid}'가 삭제되었습니다.")
+                print(f"[Scheduler GCS] [DEAD] 워커 오프라인 감지(15초 초과): 워커 '{wid}'가 삭제되었습니다.")
                 del worker_registry[wid]
                 
             # 2. 가용한 워커 탐색 (상태가 IDLE인 워커 중 CPU 사용량이 가장 낮은 워커 선정)

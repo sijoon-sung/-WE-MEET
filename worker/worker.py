@@ -13,43 +13,15 @@ from proto import babyray_pb2
 from proto import babyray_pb2_grpc
 from common.config import DEFAULT_HEARTBEAT_INTERVAL
 
-# --- 1. 가상 작업 실행기 (Mock Task Runner) ---
-
-class MockTaskRunner:
-    """단순 sleep을 활용해 에포크 단위로 AI 모델 학습 연산을 모사하는 클래스"""
-    def __init__(self, task_id, model_type, epochs):
-        self.task_id = task_id
-        self.model_type = model_type
-        self.epochs = epochs
-        self.progress = 0.0
-        self.status = "RUNNING"
-        self.logs = []
-        self.execution_time = 0.0
-
-    def run(self):
-        print(f"\n[Worker Task] 작업 실행 시작: Task ID={self.task_id} (유형: {self.model_type}, Epochs: {self.epochs})")
-        start_time = time.time()
-        
-        # 1에포크당 1초씩 소요되는 가상 학습 루프
-        for epoch in range(self.epochs):
-            time.sleep(1.0)
-            loss = 1.0 / (epoch + 1) + 0.05
-            log_line = f"Epoch {epoch+1}/{self.epochs} - Loss: {loss:.4f} - Accuracy: {75 + epoch*3}%"
-            self.logs.append(log_line)
-            print(f"[Worker Task] {self.task_id} | {log_line}")
-            
-            # 진행률 업데이트 (0.0 ~ 100.0)
-            self.progress = ((epoch + 1) / self.epochs) * 100.0
-            
-        self.execution_time = time.time() - start_time
-        self.status = "SUCCESS"
-        print(f"[Worker Task] 작업 완료: {self.task_id} (총 소요 시간: {self.execution_time:.2f}초)\n")
+# 분리된 GPU 시뮬레이터 모듈에서 실행기를 가져옵니다.
+from gpu_simulator import PyTorchTaskRunner
 
 
-# --- 2. Worker gRPC 서비스 서버 구현 ---
+# --- 1. Worker gRPC 서비스 서버 구현 ---
 
 class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
-    def __init__(self):
+    def __init__(self, worker_type):
+        self.worker_type = worker_type
         self.current_task_id = None
         self.runner = None
         self.lock = threading.Lock()
@@ -66,12 +38,13 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
                     message="Another task is already running on this worker."
                 )
             
-            # 2. 신규 가상 작업 생성
+            # 2. 신규 실제 작업(PyTorch 모델) 생성
             self.current_task_id = request.task_id
-            self.runner = MockTaskRunner(
+            self.runner = PyTorchTaskRunner(
                 task_id=request.task_id,
                 model_type=request.model_type,
-                epochs=request.epochs
+                epochs=request.epochs,
+                worker_type=self.worker_type
             )
             
             # 3. 백그라운드 스레드에서 연산 실행
@@ -108,7 +81,7 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
         )
 
 
-# --- 3. 하트비트 송신 클라이언트 루프 (Head로 전송) ---
+# --- 2. 하트비트 송신 클라이언트 루프 (Head로 전송) ---
 
 def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
     time.sleep(1.0) # Worker 자체 gRPC 서버가 부팅될 때까지 1초 대기
@@ -153,16 +126,16 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
 
 
-# --- 4. Worker 메인 구동 루프 ---
+# --- 3. Worker 메인 구동 루프 ---
 
 def serve(worker_id, node_type, port, head_host, head_port):
     # 1. Head의 명령을 수신받을 Worker 자체 gRPC 서버 실행
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=3))
-    servicer = BabyRayWorkerServicer()
+    servicer = BabyRayWorkerServicer(worker_type=node_type)
     babyray_pb2_grpc.add_BabyRayServiceServicer_to_server(servicer, server)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
-    print(f"=== [Worker] '{worker_id}' gRPC 서버 활성화 (포트: {port}) ===")
+    print(f"=== [Worker] '{worker_id}' ({node_type}) gRPC 서버 활성화 (포트: {port}) ===")
     
     # 2. Head에 하트비트를 보내는 클라이언트 스레드 가동
     hb_thread = threading.Thread(

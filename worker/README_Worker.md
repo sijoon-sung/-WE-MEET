@@ -107,3 +107,68 @@ stateDiagram-v2
 4. **우아한 종료 (Graceful Shutdown)**:
    - 워커 노드 기동 스크립트에 `KeyboardInterrupt` 시그널이 도달하면 소멸 소환 루프가 동작합니다.
    - Head Node로 `DeregisterWorker` 요청을 전달하여 마스터 노드의 레지스트리(GCS)에서 자신을 안전하게 파기하고 메모리를 회수하게 한 후 gRPC 서버를 완전히 종료합니다.
+
+
+
+## gRPC IP 및 Port 처리 방식 분석 (head.py 기준)
+
+## 5. Head Node의 gRPC IP 및 Port 처리 메커니즘
+
+제공된 `head.py` 코드에서 Head 노드가 자신을 호스팅하고, 통신을 요청한 Worker 노드의 IP와 Port를 식별하여 역방향 통신(Task 할당)을 수행하는 과정은 다음과 같이 구현되어 있다.
+
+### 가. Head 서버의 수신 대기 (Port Binding)
+
+Head 노드가 gRPC 서버를 구동할 때, 외부의 연결을 받아들이기 위해 네트워크 인터페이스와 포트를 바인딩하는 로직이다.
+
+```python
+port = os.environ.get("HEAD_PORT", str(DEFAULT_HEAD_PORT))
+server.add_insecure_port(f"[::]:{port}")
+
+```
+
+* **동적 포트 할당:** 환경변수 `HEAD_PORT`를 최우선으로 확인하며, 없을 경우 `config.py`에 정의된 `DEFAULT_HEAD_PORT`(예: 50051)를 기본값으로 사용한다.
+* **`[::]` 바인딩:** IPv4의 `0.0.0.0`과 동일한 역할을 하는 IPv6 와일드카드 주소다. 즉, 로컬호스트(`127.0.0.1`) 뿐만 아니라, 외부망(공인 IP)이나 도커 브릿지 네트워크 등 머신에 할당된 모든 네트워크 인터페이스의 요청을 해당 포트에서 수신하겠다는 의미다.
+
+### 나. 접속한 Worker의 IP 식별 및 파싱 (Peer Extraction)
+
+Worker가 `RegisterWorker` API를 호출할 때, Head 서버는 gRPC 컨텍스트(`context.peer()`)를 통해 접근한 클라이언트의 실제 IP 주소를 역추적하여 추출한다.
+
+```python
+peer = context.peer()
+if peer.startswith("ipv4:"):
+    ip = peer.split(":")[1]
+elif peer.startswith("ipv6:"):
+    last_colon = peer.rfind(":")
+    ip = peer[5:last_colon]
+    ip = ip.replace("%5B", "").replace("%5D", "").replace("[", "").replace("]", "")
+else:
+    ip = "127.0.0.1"
+
+if ip == "::1":
+    ip = "127.0.0.1"
+
+```
+
+* **`context.peer()`:** gRPC 연결의 하위 계층(TCP) 소켓 정보를 문자열 형태로 반환한다. (예: `ipv4:192.168.0.10:54321`)
+* **IPv4/IPv6 분기 처리:** * IPv4의 경우 `:`를 기준으로 분리하여 IP 부분만 추출한다.
+* IPv6의 경우 대괄호(`[]`)나 URL 인코딩(`%5B`) 등의 포맷팅이 섞여 들어올 수 있으므로, 마지막 `:`(포트 구분자) 이전까지의 문자열을 슬라이싱한 후 불필요한 특수문자를 정제한다.
+
+
+* **로컬호스트 정규화:** IPv6의 로컬 루프백 주소인 `::1`을 IPv4 형태인 `127.0.0.1`로 통일하여 GCS(`worker_registry`)에 일관된 포맷으로 저장한다.
+* **Port 저장:** IP는 네트워크 소켓에서 추출하지만, Worker가 통신을 수신할 자신의 자체 gRPC 서버 포트는 Request 페이로드(`request.port`)를 통해 명시적으로 전달받아 함께 저장한다.
+
+### 다. 역방향 통신 채널 수립 (Head -> Worker)
+
+Q-Learning 스케줄러가 특정 Worker에게 작업을 할당(`AssignTask`)할 때, GCS 레지스트리에 저장해 둔 IP와 Port를 조합하여 타겟 주소를 생성한다.
+
+```python
+ip = worker_info['ip']
+# IPv6 주소일 경우 대괄호 표기법 적용, IPv4는 일반 콜론 표기법 적용
+worker_address = f"[{ip}]:{worker_info['port']}" if ":" in ip else f"{ip}:{worker_info['port']}"
+
+channel = grpc.insecure_channel(worker_address)
+stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
+
+```
+
+* **포맷팅 규격 준수:** gRPC 채널 생성 시 주소 문자열 규칙을 따른다. 추출된 IP 내부에 `:`가 존재한다면 IPv6 주소로 간주하고 `[IP]:PORT` 형태로 조립하며, IPv4의 경우 `IP:PORT` 형태로 조립하여 채널(`insecure_channel`)을 성공적으로 오픈한다.

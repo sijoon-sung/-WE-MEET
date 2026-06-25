@@ -1,0 +1,23 @@
+# ==============================================================================
+# WE-MEET: 노드 유형별 성능 격리 스펙 및 가상 요금 모델 (cost_model.yaml)
+# ==============================================================================
+
+nodes:
+  on_demand:
+    cpu_limit: 2.0
+    memory_limit_mb: 2048
+    cost_per_hour: 1.0
+    gpu_scale_factor: 1.0
+    preemption_probability: 0.0
+  spot_a:
+    cpu_limit: 1.0
+    memory_limit_mb: 1024
+    cost_per_hour: 0.4
+    gpu_scale_factor: 0.6
+    preemption_probability: 0.3
+  spot_b:
+    cpu_limit: 0.5
+    memory_limit_mb: 512
+    cost_per_hour: 0.2
+    gpu_scale_factor: 0.3
+    preemption_probability: 0.7

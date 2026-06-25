@@ -4,14 +4,14 @@ import os
 import time
 import argparse
 import threading
-from concurrent import futures
+from concurrent import futures #thread pool을 만들기 위한 모듈
 
 # 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가하여 proto 패키지를 정상적으로 찾을 수 있도록 설정합니다.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
-from common.config import DEFAULT_HEARTBEAT_INTERVAL
+from common.config import DEFAULT_HEARTBEAT_INTERVAL # 하트비트 전송 주기 - 가져옴 (파일에서 미리 정의)
 
 # 분리된 GPU 시뮬레이터 모듈에서 실행기를 가져옵니다.
 from gpu_simulator import PyTorchTaskRunner
@@ -21,16 +21,17 @@ from gpu_simulator import PyTorchTaskRunner
 
 class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
     def __init__(self, worker_type):
-        self.worker_type = worker_type
-        self.current_task_id = None
-        self.runner = None
-        self.lock = threading.Lock()
+        self.worker_type = worker_type # worker의 종류
+        self.current_task_id = None #작업 ID를 저장
+        self.runner = None # 실제 수행할 객체 - PyTorchTaskRunner.py에 있는 클래스
+        self.lock = threading.Lock() # 여러 스레드가 동시에 변수를 건드리지 못하게 막는 race condition 방지
 
     def AssignTask(self, request, context):
-        with self.lock:
-            # 1. 이미 작업이 구동 중인지 중복 검사
+        with self.lock: # 안에 있는 critical section에 mutual exclusion 보장
+            # 1. 중복 검사: 이미 작업 ID가 있고, 그 작업이 'RUNNING' 상태라면
             if self.current_task_id is not None and self.runner.status == "RUNNING":
                 print(f"[Worker gRPC] 작업 거절: {request.task_id} (이유: 다른 작업 실행 중)")
+                # TaskResult Return
                 return babyray_pb2.TaskResult(
                     task_id=request.task_id,
                     status="FAILED",
@@ -38,8 +39,9 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
                     message="Another task is already running on this worker."
                 )
             
-            # 2. 신규 실제 작업(PyTorch 모델) 생성
+            # 2. 신규 작업 생성: 새로운 작업 ID를 저장합니다.
             self.current_task_id = request.task_id
+            # # 전달받은 옵션으로 딥러닝 구동기(Runner) 객체를 생성합니다. -> 함수에서 정의 받은 옵션으로 만들기
             self.runner = PyTorchTaskRunner(
                 task_id=request.task_id,
                 model_type=request.model_type,
@@ -47,9 +49,11 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
                 worker_type=self.worker_type
             )
             
-            # 3. 백그라운드 스레드에서 연산 실행
+            # 3. 백그라운드 실행: 새로운 스레드를 만들어 runner.run 함수를 백그라운드에서 실행시킵니다.
+            # daemon=True 설정: 메인 프로그램(worker.py)이 종료되면 이 스레드도 자동으로 함께 종료됩니다.
             threading.Thread(target=self.runner.run, daemon=True).start()
             
+            # 정상적으로 작업이 생성되었을 때 TaskResult Return
             print(f"[Worker gRPC] 작업 접수 승인: {request.task_id}")
             return babyray_pb2.TaskResult(
                 task_id=request.task_id,
@@ -58,23 +62,27 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
                 message="Task assigned successfully, executing in background."
             )
 
+    # 작업 상태 조회
     def GetTaskStatus(self, request, context):
-        with self.lock:
+        with self.lock: #mutual exclusion 보장
+            # 현재 실행 중인 작업이 없거나, 작업 ID가 요청과 다르면
             if self.runner is None or self.runner.task_id != request.task_id:
                 return babyray_pb2.TaskStatusResponse(
                     status="NOT_FOUND",
                     progress=0.0,
                     logs="No such task found on this worker."
                 )
-            
+            #제대로 된 요청이라면 현재 작업의 상태, 진행률, 로그를 모아서 반환
             return babyray_pb2.TaskStatusResponse(
                 status=self.runner.status,
                 progress=self.runner.progress,
                 logs="\n".join(self.runner.logs)
             )
-
+            
+    # request - 클라이언트가 보낸 자원 크기
     def ResizeResources(self, request, context):
         print(f"[Worker gRPC] 자원 크기 조절 요청 수신: CPU={request.cpu_cores} Cores, Mem={request.memory_bytes} Bytes")
+        # response - 헤드에게 보내는 답변
         return babyray_pb2.ResizeResponse(
             success=True,
             message=f"Configured worker cGroups: CPU={request.cpu_cores}, Mem={request.memory_bytes}"
@@ -86,16 +94,17 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
 def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
     time.sleep(1.0) # Worker 자체 gRPC 서버가 부팅될 때까지 1초 대기
     
-    head_address = f"{head_host}:{head_port}"
+    head_address = f"{head_host}:{head_port}" # Head 노드의 주소(IP:Port)를 만듭니다.
     print(f"[Heartbeat] Head 서버 연결 시도: {head_address}...")
     
-    channel = grpc.insecure_channel(head_address)
-    stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
+    channel = grpc.insecure_channel(head_address) # 연결 채널 생성
+    stub = babyray_pb2_grpc.BabyRayServiceStub(channel) # stub 객체 생성 - grpc 통신 프로토컬 저장
     
     # 1. Head 서버에 워커 등록 요청
-    registered = False
-    while not registered:
+    registered = False # 등록 여부
+    while not registered: # 등록이 될 때까지 반복
         try:
+            # Head 노드의 RegisterWorker 함수 호출 -> 내 정보에 등록
             response = stub.RegisterWorker(babyray_pb2.RegisterRequest(
                 worker_id=worker_id,
                 node_type=node_type,
@@ -107,19 +116,23 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
             else:
                 print(f"[Heartbeat] 등록 거절됨. 3초 후 재시도...")
                 time.sleep(3)
+
+        # Worker는 살아있으나, Worker와 Head 사이의 네트워크 회선이 끊어졌거나 Head 서버 자체가 크래시(Crash)되어 다운된 상황이다.
         except grpc.RpcError:
             print(f"[Heartbeat] Head 서버 연결 지연. 3초 후 재시도...")
-            time.sleep(3)
+            time.sleep(3) # 3초 후 재시도 
             
     # 2. 주기적 생존 신고 및 상태 리포트
     while True:
         try:
-            # 더미 자원 수치 송신
+            # 더미 자원 수치 송신 -> 임의 값
             stub.SendHeartbeat(babyray_pb2.HeartbeatRequest(
                 worker_id=worker_id,
                 cpu_utilization=12.5,
                 memory_utilization=40.0
             ))
+            
+        # Worker는 살아있으나, Worker와 Head 사이의 네트워크 회선이 끊어졌거나 Head 서버 자체가 크래시(Crash)되어 다운된 상황이다.
         except grpc.RpcError:
             print(f"[Heartbeat] 경고: 생존 신고 전송 실패 (Head 연결이 끊겼습니다)")
             
@@ -130,11 +143,11 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
 
 def serve(worker_id, node_type, port, head_host, head_port):
     # 1. Head의 명령을 수신받을 Worker 자체 gRPC 서버 실행
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=3))
-    servicer = BabyRayWorkerServicer(worker_type=node_type)
-    babyray_pb2_grpc.add_BabyRayServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
-    server.start()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=3)) #Head로 부터 요청이 병목이 생기지 않도록 스레드 3개を用意
+    servicer = BabyRayWorkerServicer(worker_type=node_type) # Worker 서버 객체 생성
+    babyray_pb2_grpc.add_BabyRayServiceServicer_to_server(servicer, server) # 서비서를 서버에 등록
+    server.add_insecure_port(f"[::]:{port}") # 서버 포트 설정
+    server.start() # 서버 시작
     print(f"=== [Worker] '{worker_id}' ({node_type}) gRPC 서버 활성화 (포트: {port}) ===")
     
     # 2. Head에 하트비트를 보내는 클라이언트 스레드 가동
@@ -145,9 +158,12 @@ def serve(worker_id, node_type, port, head_host, head_port):
     )
     hb_thread.start()
     
+    #process가 코드가 끝까지 도달 했을 때 종료시키기 않기 위해서 sleep을 걸어 둠
     try:
         while True:
-            time.sleep(86400)
+            time.sleep(86400) # 24시간 -> 리소스는 소모 안함
+
+    # ctrl + C
     except KeyboardInterrupt:
         print(f"\n[Worker] '{worker_id}' 종료 중...")
         try:
@@ -157,7 +173,7 @@ def serve(worker_id, node_type, port, head_host, head_port):
             stub.DeregisterWorker(babyray_pb2.DeregisterRequest(worker_id=worker_id))
         except Exception:
             pass
-        server.stop(0)
+        server.stop(0) # grpc 요청을 안기다리고 닫음
 
 
 if __name__ == '__main__':
@@ -170,3 +186,4 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     serve(args.id, args.type, args.port, args.head_host, args.head_port)
+# python worker.py --id worker-02 --port 50053 --type spot -> serve 함수 구동

@@ -6,8 +6,9 @@ import argparse
 import threading
 from concurrent import futures #thread pool을 만들기 위한 모듈
 
-# 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가하여 proto 패키지를 정상적으로 찾을 수 있도록 설정합니다.
+# 실행 시 프로젝트 루트 디렉토리 및 현재 디렉토리를 sys.path에 추가하여 패키지들을 정상적으로 찾을 수 있도록 설정합니다.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
@@ -181,8 +182,8 @@ if __name__ == '__main__':
     parser.add_argument("--id", type=str, default="worker-01", help="Worker ID")
     parser.add_argument("--type", type=str, default="on_demand", help="Worker Type")
     parser.add_argument("--port", type=int, default=50052, help="Worker listening port")
-    parser.add_argument("--head-host", type=str, default="localhost", help="Head node IP/Host")
-    parser.add_argument("--head-port", type=int, default=50051, help="Head node port")
+    parser.add_argument("--head-host", type=str, default=os.environ.get("HEAD_HOST", "localhost"), help="Head node IP/Host")
+    parser.add_argument("--head-port", type=int, default=int(os.environ.get("HEAD_PORT", 50051)), help="Head node port")
     
     args = parser.parse_args()
     serve(args.id, args.type, args.port, args.head_host, args.head_port)

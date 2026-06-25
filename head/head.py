@@ -11,8 +11,9 @@ import threading
 import random
 import subprocess
 
-# 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가하여 proto 패키지를 정상적으로 찾을 수 있도록 설정합니다.
+# 실행 시 프로젝트 루트 디렉토리 및 현재 디렉토리를 sys.path에 추가하여 패키지들을 정상적으로 찾을 수 있도록 설정합니다.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
@@ -66,11 +67,14 @@ def scale_workers(service_name, target_count):
         compose_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../docker/docker-compose.yml'))
         
         # subprocess.run()을 사용하여 백그라운드 쉘에서 도커 컴포즈 동적 스케일링 명령어를 실행시킵니다.
+        # --no-recreate와 대상 서비스명을 명시하여 Head 컨테이너가 스스로를 재기동(137 종료)하는 재귀 루프를 방지합니다.
         cmd = [
             "docker", "compose",
             "-f", compose_path,
             "up", "-d",
-            "--scale", f"{service_name}={target_count}"
+            "--no-recreate",
+            "--scale", f"{service_name}={target_count}",
+            service_name
         ]
         
         # subprocess를 이용해 명령 실행 후 출력과 결과를 반환받음

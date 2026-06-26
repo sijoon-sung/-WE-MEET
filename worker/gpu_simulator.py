@@ -4,33 +4,98 @@ import time
 try:
     import torch
     import torch.nn as nn
-    import torch.optim as optim
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+    import torch.optim as optim     # 최적화 함수
+    HAS_TORCH = True                # True로 설정하여 아래 코드에서 정상적으로 연산하도록 함
+except ImportError:     
+    HAS_TORCH = False               # False로 설정하여 아래 코드에서 더미 연산으로 넘어감
 
-# --- 1. PyTorch 모델 정의 (RNN, CNN, LSTM) ---
+
+# --- 0. 부하 제어 하이퍼파라미터 ---
+
+# CNN 학습 루프 설정
+CNN_BATCH_SIZE = 128          # 미니배치 크기 (기존 64 → 128)
+CNN_NUM_BATCHES = 100         # 에포크당 미니배치 반복 횟수 (기존 50 → 100)
+CNN_IMAGE_SIZE = 28           # 입력 이미지 크기 (MNIST 표준)
+CNN_NUM_CLASSES = 10          # 분류 클래스 수
+
+# RNN/LSTM 학습 루프 설정
+SEQ_BATCH_SIZE = 128          # 미니배치 크기 (기존 64 → 128)
+SEQ_NUM_BATCHES = 100         # 에포크당 미니배치 반복 횟수 (기존 50 → 100)
+SEQ_LENGTH = 30               # 시퀀스 길이 (기존 15 → 30)
+SEQ_FEATURE_SIZE = 32         # 입력 피처 차원 (기존 10 → 32)
+SEQ_HIDDEN_SIZE = 64          # 은닉 상태 차원 (기존 20 → 64)
+SEQ_NUM_CLASSES = 10          # 분류 클래스 수
+
+# LSTM Embedding 설정
+LSTM_VOCAB_SIZE = 1000        # 어휘 사전 크기
+LSTM_EMBED_DIM = 32           # 임베딩 벡터 차원
+
+# Fallback 더미 연산 설정
+FALLBACK_DUMMY_LOOP = 500000  # CPU 부하 모사 루프 횟수 (기존 200000 → 500000)
+FALLBACK_SLEEP = 0.05         # Fallback 시 최소 대기 시간(초)
+
+
+# --- 1. PyTorch 모델 정의 (CNN, RNN, LSTM) ---
 
 if HAS_TORCH:
     class CNNModel(nn.Module):
-        """간단한 이미지 분류용 합성곱 신경망 (CNN)"""
+        """3-Layer Conv + BatchNorm + Dropout 기반 이미지 분류 합성곱 신경망 (CNN)
+        
+        구조:
+            Conv2d(1→32) → BatchNorm → ReLU → MaxPool(2×2)   [28×28 → 14×14]
+            Conv2d(32→64) → BatchNorm → ReLU → MaxPool(2×2)  [14×14 → 7×7]
+            Conv2d(64→128) → BatchNorm → ReLU → MaxPool(2×2) [7×7 → 3×3]
+            Flatten → Dropout(0.3) → FC(128*3*3 → 128) → ReLU → FC(128 → 10)
+        """
         def __init__(self):
             super().__init__()
-            self.conv = nn.Conv2d(1, 16, kernel_size=3, padding=1)
+            # 제1 합성곱 블록: 1채널 → 32채널
+            self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(32)
+            # 제2 합성곱 블록: 32채널 → 64채널
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+            self.bn2 = nn.BatchNorm2d(64)
+            # 제3 합성곱 블록: 64채널 → 128채널
+            self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            self.bn3 = nn.BatchNorm2d(128)
+            
             self.pool = nn.MaxPool2d(2, 2)
-            self.fc = nn.Linear(16 * 14 * 14, 10)
+            self.dropout = nn.Dropout(0.3)
+            
+            # 28→14→7→3 (MaxPool 3회), 128채널 × 3 × 3 = 1152
+            self.fc1 = nn.Linear(128 * 3 * 3, 128)
+            self.fc2 = nn.Linear(128, CNN_NUM_CLASSES)
 
         def forward(self, x):
-            x = self.pool(torch.relu(self.conv(x)))
-            x = x.view(-1, 16 * 14 * 14)
-            return self.fc(x)
+            # 블록 1: Conv → BN → ReLU → Pool  [B,1,28,28] → [B,32,14,14]
+            x = self.pool(torch.relu(self.bn1(self.conv1(x))))
+            # 블록 2: Conv → BN → ReLU → Pool  [B,32,14,14] → [B,64,7,7]
+            x = self.pool(torch.relu(self.bn2(self.conv2(x))))
+            # 블록 3: Conv → BN → ReLU → Pool  [B,64,7,7] → [B,128,3,3]
+            x = self.pool(torch.relu(self.bn3(self.conv3(x))))
+            # Flatten → Dropout → FC1 → ReLU → FC2
+            x = x.view(-1, 128 * 3 * 3)
+            x = self.dropout(x)
+            x = torch.relu(self.fc1(x))
+            return self.fc2(x)
 
     class RNNModel(nn.Module):
-        """간단한 시퀀스 분류용 순환 신경망 (RNN)"""
+        """2-Layer Stacked RNN + Dropout 기반 시퀀스 분류 순환 신경망 (RNN)
+        
+        구조:
+            nn.RNN(input=32, hidden=64, num_layers=2, dropout=0.3)
+            → 마지막 시점 출력 → FC(64 → 10)
+        """
         def __init__(self):
             super().__init__()
-            self.rnn = nn.RNN(input_size=10, hidden_size=20, batch_first=True)
-            self.fc = nn.Linear(20, 10)
+            self.rnn = nn.RNN(
+                input_size=SEQ_FEATURE_SIZE,
+                hidden_size=SEQ_HIDDEN_SIZE,
+                num_layers=2,          # 2층 스택 RNN
+                batch_first=True,
+                dropout=0.3            # 다층 RNN 간 드롭아웃
+            )
+            self.fc = nn.Linear(SEQ_HIDDEN_SIZE, SEQ_NUM_CLASSES)
 
         def forward(self, x):
             out, _ = self.rnn(x)
@@ -38,33 +103,49 @@ if HAS_TORCH:
             return self.fc(out[:, -1, :])
 
     class LSTMModel(nn.Module):
-        """간단한 시퀀스 분류용 장단기 메모리 신경망 (LSTM)"""
+        """2-Layer Stacked LSTM + Embedding 기반 시퀀스 분류 장단기 메모리 신경망 (LSTM)
+        
+        구조:
+            nn.Embedding(vocab=1000, dim=32)
+            → nn.LSTM(input=32, hidden=64, num_layers=2, dropout=0.3)
+            → 마지막 시점 출력 → FC(64 → 10)
+        """
         def __init__(self):
             super().__init__()
-            self.lstm = nn.LSTM(input_size=10, hidden_size=20, batch_first=True)
-            self.fc = nn.Linear(20, 10)
+            # Embedding 레이어: 정수 토큰 → 연속 벡터 변환
+            self.embedding = nn.Embedding(LSTM_VOCAB_SIZE, LSTM_EMBED_DIM)
+            self.lstm = nn.LSTM(
+                input_size=LSTM_EMBED_DIM,
+                hidden_size=SEQ_HIDDEN_SIZE,
+                num_layers=2,          # 2층 스택 LSTM
+                batch_first=True,
+                dropout=0.3            # 다층 LSTM 간 드롭아웃
+            )
+            self.fc = nn.Linear(SEQ_HIDDEN_SIZE, SEQ_NUM_CLASSES)
 
         def forward(self, x):
+            # x: (batch, seq_len) 정수 인덱스 → Embedding → (batch, seq_len, embed_dim)
+            x = self.embedding(x)
             out, _ = self.lstm(x)
             # 마지막 시점의 출력을 분류기에 입력
             return self.fc(out[:, -1, :])
 
 
 def run_pytorch_epoch(model_type, device):
-    """각 모델 타입에 맞춰 1에포크 분량의 더미 연산을 구동하고 오차를 계산합니다."""
+    """각 모델 타입에 맞춰 1에포크 분량의 부하 연산을 구동하고 오차를 계산합니다."""
     if not HAS_TORCH:
         return 0.0
 
     if model_type.upper() == "CNN":
         model = CNNModel().to(device)
-        optimizer = optim.SGD(model.parameters(), lr=0.01)
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
-        # 연산 시간 확보를 위한 미니배치 루프
+        # 연산 부하 확보를 위한 미니배치 루프
         loss_val = 0.0
-        for _ in range(50):
-            inputs = torch.randn(64, 1, 28, 28, device=device)
-            targets = torch.randint(0, 10, (64,), device=device)
+        for _ in range(CNN_NUM_BATCHES):
+            inputs = torch.randn(CNN_BATCH_SIZE, 1, CNN_IMAGE_SIZE, CNN_IMAGE_SIZE, device=device)
+            targets = torch.randint(0, CNN_NUM_CLASSES, (CNN_BATCH_SIZE,), device=device)
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -73,19 +154,15 @@ def run_pytorch_epoch(model_type, device):
             loss_val = loss.item()
         return loss_val
 
-    elif model_type.upper() in ["RNN", "LSTM"]:
-        if model_type.upper() == "RNN":
-            model = RNNModel().to(device)
-        else:
-            model = LSTMModel().to(device)
-            
-        optimizer = optim.SGD(model.parameters(), lr=0.01)
+    elif model_type.upper() == "RNN":
+        model = RNNModel().to(device)
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
         loss_val = 0.0
-        for _ in range(50):
-            inputs = torch.randn(64, 15, 10, device=device)  # sequence length=15, feature size=10
-            targets = torch.randint(0, 10, (64,), device=device)
+        for _ in range(SEQ_NUM_BATCHES):
+            inputs = torch.randn(SEQ_BATCH_SIZE, SEQ_LENGTH, SEQ_FEATURE_SIZE, device=device)
+            targets = torch.randint(0, SEQ_NUM_CLASSES, (SEQ_BATCH_SIZE,), device=device)
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -93,6 +170,25 @@ def run_pytorch_epoch(model_type, device):
             optimizer.step()
             loss_val = loss.item()
         return loss_val
+
+    elif model_type.upper() == "LSTM":
+        model = LSTMModel().to(device)
+        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        criterion = nn.CrossEntropyLoss()
+        
+        loss_val = 0.0
+        for _ in range(SEQ_NUM_BATCHES):
+            # LSTM은 Embedding 레이어를 사용하므로 정수 인덱스 입력 생성
+            inputs = torch.randint(0, LSTM_VOCAB_SIZE, (SEQ_BATCH_SIZE, SEQ_LENGTH), device=device)
+            targets = torch.randint(0, SEQ_NUM_CLASSES, (SEQ_BATCH_SIZE,), device=device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            loss_val = loss.item()
+        return loss_val
+
     else:
         # 알 수 없는 모델 타입의 경우 0.1초 지연 처리
         time.sleep(0.1)
@@ -140,15 +236,15 @@ class PyTorchTaskRunner:
                 except Exception as e:
                     print(f"[Worker Task] 연산 중 경고 발생 (Fallback 대체): {e}")
                     loss = 1.0 / (epoch + 1)
-                    time.sleep(0.05)
+                    time.sleep(FALLBACK_SLEEP)
             else:
                 # PyTorch 라이브러리가 없을 때의 모사 연산
                 loss = 1.0 / (epoch + 1)
                 # CPU 연산 시간 모사를 위한 더미 루프
                 dummy_sum = 0
-                for x in range(200000):
+                for x in range(FALLBACK_DUMMY_LOOP):
                     dummy_sum += x
-                time.sleep(0.05)
+                time.sleep(FALLBACK_SLEEP)
                 
             # 2. GPU 비동기 연산 완료 동기화
             if HAS_TORCH and device == "cuda":

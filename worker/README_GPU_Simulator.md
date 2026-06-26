@@ -72,21 +72,38 @@ flowchart TD
 ## 4. 3대 ML 워크로드 신경망 구조 및 연산 사양
 
 시뮬레이터 내부에서 실제 텐서 연산을 통해 물리 부하를 생성하는 PyTorch 모델 구조입니다.
+모든 하이퍼파라미터는 `gpu_simulator.py` 상단의 설정 상수로 분리되어 외부 조정이 용이합니다.
 
-### ① 이미지 분류 (CNNModel)
-- **네트워크 구성**: `nn.Conv2d(1, 16, 3, padding=1)` $\rightarrow$ `nn.MaxPool2d(2, 2)` $\rightarrow$ `nn.Linear(16*14*14, 10)`
-- **데이터 구조**: 합성 MNIST 이미지 형태의 4차원 텐서 `(Batch=64, Channel=1, Width=28, Height=28)`
-- **연산 패턴**: 공간 필터링 중심의 GPU 병렬 연산 유도용 모델 (GPU 연산 집약형)
+### ① 이미지 분류 (CNNModel) — 3-Layer Conv + BatchNorm + Dropout
+- **네트워크 구성**:
+  `Conv2d(1→32) + BN + ReLU + MaxPool` $\rightarrow$ `Conv2d(32→64) + BN + ReLU + MaxPool` $\rightarrow$ `Conv2d(64→128) + BN + ReLU + MaxPool` $\rightarrow$ `Dropout(0.3)` $\rightarrow$ `FC(1152→128) + ReLU` $\rightarrow$ `FC(128→10)`
+- **데이터 구조**: 합성 MNIST 이미지 형태의 4차원 텐서 `(Batch=128, Channel=1, Width=28, Height=28)`
+- **에포크당 연산**: 미니배치 100회 반복 (총 12,800장/에포크)
+- **연산 패턴**: 3단계 공간 필터링 + BatchNorm 통계 추적으로 GPU 연산 집약형 부하 극대화
 
-### ② 시계열 예측 (RNNModel)
-- **네트워크 구성**: `nn.RNN(input_size=10, hidden_size=20, batch_first=True)` $\rightarrow$ `nn.Linear(20, 10)`
-- **데이터 구조**: 3차원 시퀀스 텐서 `(Batch=64, SeqLen=15, Feature=10)`
-- **연산 패턴**: 시차 의존 연산으로 CPU 오버헤드와 GPU 파이프라인의 균형적 활용 모사 (CPU/GPU 균형 연산형)
+### ② 시계열 예측 (RNNModel) — 2-Layer Stacked RNN + Dropout
+- **네트워크 구성**: `nn.RNN(input_size=32, hidden_size=64, num_layers=2, dropout=0.3)` $\rightarrow$ `nn.Linear(64, 10)`
+- **데이터 구조**: 3차원 시퀀스 텐서 `(Batch=128, SeqLen=30, Feature=32)`
+- **에포크당 연산**: 미니배치 100회 반복
+- **연산 패턴**: 2층 스택 순환 구조로 시차 의존 연산량 증대, CPU/GPU 균형 연산형
 
-### ③ 자연어 처리 (LSTMModel)
-- **네트워크 구성**: `nn.LSTM(input_size=10, hidden_size=20, batch_first=True)` $\rightarrow$ `nn.Linear(20, 10)`
-- **데이터 구조**: 3차원 시퀀스 텐서 `(Batch=64, SeqLen=15, Feature=10)`
-- **연산 패턴**: 게이트 연산이 추가되어 연산 가중치와 상태 보존을 위한 리소스 사용을 유도 (메모리 집약형)
+### ③ 자연어 처리 (LSTMModel) — 2-Layer Stacked LSTM + Embedding
+- **네트워크 구성**: `nn.Embedding(vocab=1000, dim=32)` $\rightarrow$ `nn.LSTM(input_size=32, hidden_size=64, num_layers=2, dropout=0.3)` $\rightarrow$ `nn.Linear(64, 10)`
+- **데이터 구조**: 정수 인덱스 시퀀스 `(Batch=128, SeqLen=30)` → Embedding → `(Batch=128, SeqLen=30, Dim=32)`
+- **에포크당 연산**: 미니배치 100회 반복
+- **연산 패턴**: Embedding 룩업 + 4-게이트 LSTM 2층 스택으로 메모리 집약형 부하 극대화
+
+### 부하 제어 하이퍼파라미터 요약
+
+| 파라미터 | 이전 값 | 변경 값 | 효과 |
+| :--- | :--- | :--- | :--- |
+| 배치 크기 | 64 | **128** | GPU 메모리 점유 2배 증가 |
+| 미니배치 반복 | 50 | **100** | 에포크당 연산량 2배 증가 |
+| RNN/LSTM 시퀀스 길이 | 15 | **30** | 순환 연산 깊이 2배 |
+| RNN/LSTM 피처 크기 | 10 | **32** | 은닉 계산 복잡도 증가 |
+| RNN/LSTM 은닉 차원 | 20 | **64** | 파라미터 수 대폭 증가 |
+| CNN 채널 수 | 16 (1층) | **32→64→128 (3층)** | 합성곱 연산량 대폭 증가 |
+| Fallback 더미 루프 | 200,000 | **500,000** | PyTorch 없이도 CPU 부하 증가 |
 
 ---
 
@@ -103,7 +120,7 @@ except ImportError:
 ```
 
 - **라이브러리 부재 시 대체 연산**: 
-  `HAS_TORCH = False`인 상태가 되면, 에포크 당 실제 학습 연산 대신 CPU 부하를 모사하기 위해 약 20만 회의 더미 연산 루프(`for x in range(200000)`) 및 50ms의 강제 대기(`time.sleep(0.05)`)를 실행합니다.
+  `HAS_TORCH = False`인 상태가 되면, 에포크 당 실제 학습 연산 대신 CPU 부하를 모사하기 위해 약 50만 회의 더미 연산 루프(`for x in range(500000)`) 및 50ms의 강제 대기(`time.sleep(0.05)`)를 실행합니다.
 - **예외 복구 메커니즘**:
   PyTorch가 있더라도 연산 도중 에러가 나면 예외 캐치(`except Exception`)를 통해 `loss = 1.0 / (epoch + 1)` 값으로 자동 대체하고 학습 루프를 무사히 끝마치도록 보장합니다.
 - **속도 시뮬레이션 호환**: 

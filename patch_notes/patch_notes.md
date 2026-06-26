@@ -90,6 +90,30 @@
 
 ---
 
+### 5. [인프라 제어/확장성] 동적 스케일아웃 적용 시 컨테이너명 충돌 및 중복 등록 이슈 (Auto Scaling 확장성 패치)
+* **발생 현상:**
+  - `docker compose --scale` 실행 시 고정된 컨테이너명 설정으로 인해 스케일링이 차단되거나, 여러 대 구동 시 동일한 ID(`worker-2`)로 헤드 노드에 중복 등록되어 기존 세션 정보를 덮어쓰고 통신이 어긋나는 이슈가 있었습니다.
+* **원인 분석:**
+  - `docker-compose.yml` 내부에 `container_name: babyray-worker-2`와 같이 고정된 컨테이너명이 설정되어 있으면, Docker Compose는 이를 2대 이상으로 확장하여 띄울 수 없습니다 (이름 충돌 방지 차원).
+  - 또한, `--id worker-2` 옵션으로 실행되는 모든 스케일링 인스턴스들이 동일한 ID로 헤드에 `RegisterWorker`를 호출하여 레지스트리 맵의 키를 덮어쓰는 문제가 있었습니다.
+* **해결 및 패치 내용:**
+  - [docker/docker-compose.yml](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/docker/docker-compose.yml) 파일에서 스케일링 대상인 `worker-2` 및 `worker-3` 서비스의 고정 `container_name` 설정을 제거하여 도커가 고유 번호 기반의 다중 컨테이너를 가동할 수 있도록 허용했습니다.
+  - [worker/worker.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/worker/worker.py) 최하단 구동부에서 `socket.gethostname()` (컨테이너 ID)을 추출하여 기존 ID 뒤에 `@` 구분자로 결합함으로써 고유 ID를 보장했습니다 (`worker-2@<container_id>`).
+  - [head/head.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/head.py) 내부 `SendHeartbeat`에서 이 `@` 구분값에서 컨테이너 ID를 파싱하여 도커 SDK의 개별 리소스 메트릭을 추적하도록 처리하고, 스케줄러 루프에서 특정 ID가 아닌 `node_type`과 `IDLE` 상태 기준으로 가용한 워커를 탐색·할당하도록 범용성을 패치했습니다.
+
+---
+
+### 6. [모니터링] `psutil` 및 `cgroups` 연동을 통한 실시간 실제 자원 사용량 리포팅 패치
+* **발생 현상:**
+  - 기존에는 Worker 노드 기동 시 Heartbeat 전송부에서 실시간 점유율이 아닌 하드코딩된 더미 메트릭 값(`cpu=12.5%`, `mem=40.0%`)을 송신하고 있었습니다.
+* **원인 분석:**
+  - 로컬 노드 기동 및 컨테이너 환경의 격리 시 실제 연산 부하가 스케줄러로 피드백되지 않아 Q-learning 에이전트의 상태(State) 판단에 왜곡이 생길 수 있었습니다.
+* **해결 및 패치 내용:**
+  - [worker/worker.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/worker/worker.py) 최상단에 `psutil` 라이브러리를 임포트하고, 하트비트 루프 기동 전 CPU 수집 캘리브레이션을 수행하도록 구현했습니다.
+  - 리눅스 컨테이너 격리 메모리(cgroup v1/v2)를 우선 탐색하는 경로 파싱 로직(`memory.usage_in_bytes`, `memory.current` 등)을 탑재하여 격리 제한 대비 실제 사용 비중을 산출하고, 예외 발생 시 `psutil.virtual_memory().percent`로 자동 폴백(Fallback) 처리하여 gRPC 통신으로 실시간 데이터를 전송하도록 연동을 완수했습니다.
+
+---
+
 ## 📅 2026-06-24 패치 내역
 
 ### 1. Protobuf 컴파일 외부 임포트 시 경로 불일치 이슈

@@ -1,6 +1,8 @@
 import grpc
 import sys
 import os
+import socket
+import psutil
 import time
 import argparse
 import threading
@@ -124,14 +126,44 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
             time.sleep(3) # 3초 후 재시도 
             
     # 2. 주기적 생존 신고 및 상태 리포트
+    # 첫 호출 전 CPU 메트릭 캘리브레이션을 진행합니다.
+    psutil.cpu_percent(interval=None)
+    
     while True:
         try:
-            # 더미 자원 수치 송신 -> 임의 값
+            # 1. 실제 CPU 사용률 수집 (이전 호출 이후의 점유비)
+            cpu_util = psutil.cpu_percent(interval=None)
+            
+            # 2. 실제 메모리 사용률 수집 (cgroup 메모리 제한 대비 사용량 우선 조회)
+            mem_util = 0.0
+            try:
+                # cgroup v1 메모리 조회
+                with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r") as f:
+                    usage = int(f.read().strip())
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+                    limit = int(f.read().strip())
+                mem_util = (usage / limit) * 100.0 if limit > 0 else psutil.virtual_memory().percent
+            except Exception:
+                try:
+                    # cgroup v2 메모리 조회
+                    with open("/sys/fs/cgroup/memory.current", "r") as f:
+                        usage = int(f.read().strip())
+                    with open("/sys/fs/cgroup/memory.max", "r") as f:
+                        limit_str = f.read().strip()
+                        limit = int(limit_str) if limit_str != "max" else psutil.virtual_memory().total
+                    mem_util = (usage / limit) * 100.0 if limit > 0 else psutil.virtual_memory().percent
+                except Exception:
+                    # Fallback: 호스트 기준 가상 메모리 사용률
+                    mem_util = psutil.virtual_memory().percent
+            
+            # 실시간 자원 수치 송신
             stub.SendHeartbeat(babyray_pb2.HeartbeatRequest(
                 worker_id=worker_id,
-                cpu_utilization=12.5,
-                memory_utilization=40.0
+                cpu_utilization=round(cpu_util, 1),
+                memory_utilization=round(mem_util, 1)
             ))
+            # 콘솔에 전송 메트릭 출력
+            print(f"[Heartbeat] 생존 신고 송신 -> CPU: {round(cpu_util, 1)}%, Mem: {round(mem_util, 1)}%")
             
         # Worker는 살아있으나, Worker와 Head 사이의 네트워크 회선이 끊어졌거나 Head 서버 자체가 크래시(Crash)되어 다운된 상황이다.
         except grpc.RpcError:
@@ -186,5 +218,7 @@ if __name__ == '__main__':
     parser.add_argument("--head-port", type=int, default=int(os.environ.get("HEAD_PORT", 50051)), help="Head node port")
     
     args = parser.parse_args()
-    serve(args.id, args.type, args.port, args.head_host, args.head_port)
+    # 컨테이너 호스트명(Container ID)을 결합하여 고유 ID 보장
+    unique_worker_id = f"{args.id}@{socket.gethostname()}"
+    serve(unique_worker_id, args.type, args.port, args.head_host, args.head_port)
 # python worker.py --id worker-02 --port 50053 --type spot -> serve 함수 구동

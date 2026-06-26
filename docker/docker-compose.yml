@@ -39,7 +39,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     networks:
       - babyray-net
     environment:
@@ -64,7 +64,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     networks:
       - babyray-net
     environment:
@@ -89,7 +89,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     networks:
       - babyray-net
     environment:
@@ -97,4 +97,3 @@ services:
       - HEAD_HOST=head
       - HEAD_PORT=50051
       - PYTHONUNBUFFERED=1
-

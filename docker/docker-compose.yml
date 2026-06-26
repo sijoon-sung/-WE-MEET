@@ -39,7 +39,7 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     networks:
       - babyray-net
     environment:
@@ -64,11 +64,36 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     networks:
       - babyray-net
     environment:
       - NODE_TYPE=spot_a
+      - HEAD_HOST=head
+      - HEAD_PORT=50051
+      - PYTHONUNBUFFERED=1
+
+  # Spot-B 노드 (0.5 Core, 512MB Memory, GPU 0.3 배율)
+  worker-3:
+    image: babyray-image:latest
+    container_name: babyray-worker-3
+    depends_on:
+      - head
+    command: python -m worker.worker --id worker-3 --type spot_b --port 50054
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    networks:
+      - babyray-net
+    environment:
+      - NODE_TYPE=spot_b
       - HEAD_HOST=head
       - HEAD_PORT=50051
       - PYTHONUNBUFFERED=1

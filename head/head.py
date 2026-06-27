@@ -7,6 +7,7 @@ from concurrent import futures
 import time
 import os
 import sys
+import psutil
 import threading
 import random
 import subprocess
@@ -57,45 +58,247 @@ agent = QLearningAgent(cost_model_path=COST_MODEL_PATH)
 
 # --- 2. Docker 가상 클러스터 동적 통제 API (Docker SDK & CLI) ---
 
-def scale_workers(service_name, target_count):
+def get_gpu_free_memory():
     """
-    [Docker SDK CLI API]
-    호스트 PC의 Docker Compose CLI를 호출하여 해당 워커 노드 컨테이너의 활성 대수를 변경합니다.
-    - SCALE_OUT 발생 시 target_count를 늘려 새 워커를 가동하고
-    - SCALE_IN 발생 시 target_count를 줄여 유휴 노드를 회수합니다.
+    [Global Host Resource Manager]
+    nvidia-smi 명령어를 호출하여 호스트 GPU의 가용 VRAM 용량(MiB)을 획득합니다.
     """
     try:
-        # docker-compose.yml 경로 추출 (head/../docker/docker-compose.yml)
-        compose_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../docker/docker-compose.yml'))
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,nounits,noheader"],
+            capture_output=True, text=True, check=True
+        )
+        free_vram = int(result.stdout.strip())
+        return free_vram
+    except Exception:
+        # GPU 드라이버 미인식 시 모니터링 불가 상태로 간주 (-1 반환)
+        return -1
+
+
+def cleanup_zombie_containers():
+    """
+    [Docker SDK Startup Clean]
+    Head 노드 기동 시, 호스트에 남겨진 이전 라이프사이클의 
+    동적 Spot 워커 컨테이너(babyray-worker-2-*, babyray-worker-3-*)들을 일괄 정리하여 자원을 회수합니다.
+    """
+    if DOCKER_CLIENT is None:
+        return
         
-        # subprocess.run()을전달할 명령어를 리스트 형태로 구성하기 시작합니다.
-        # --no-recreate와 대상 서비스명을 명시하여 Head 컨테이너가 스스로를 재기동(137 종료)하는 재귀 루프를 방지합니다.
-        cmd = [
-            "docker", "compose",
-            "-f", compose_path,
-            "up", "-d",
-            "--no-recreate",
-            "--scale", f"{service_name}={target_count}",
-            service_name
-        ]
+    print("[Docker GCS Startup] 기존 잔존 동적 컨테이너 청소 작업을 시작합니다...")
+    try:
+        containers = DOCKER_CLIENT.containers.list(all=True)
+        cleaned_count = 0
+        for container in containers:
+            c_name = container.name
+            if c_name.startswith("babyray-worker-2-") or c_name.startswith("babyray-worker-3-"):
+                print(f"[Docker GCS Startup] 잔존 컨테이너 감지 및 정리: {c_name}")
+                try:
+                    container.stop(timeout=2)
+                except Exception:
+                    pass
+                try:
+                    container.remove(force=True)
+                    cleaned_count += 1
+                except Exception as e:
+                    print(f"[Docker GCS Startup] 컨테이너 {c_name} 제거 실패: {e}")
+        print(f"[Docker GCS Startup] 총 {cleaned_count}개의 잔존 컨테이너가 정리되었습니다.\n")
+    except Exception as e:
+        print(f"[Docker GCS Startup] 잔존 컨테이너 조회 중 에러 발생: {e}\n")
 
-        # -f 뒤에 compose_path를 전달 -> 동적 스케일링 적용할 compose 파일 명시
-        # up -d -> 백그라운드에서 실행
-        # --no-recreate -> 기존 컨테이너가 있어도 재생성하지 않음 (오류나 멈춤으로 인해 재실행시 기존 컨테이너 정보 유지 -> 137 방지)
-        # --scale -> 서비스 이름과 원하는 수를 지정 -> 워커 컨테이너 수를 조절
 
-        # docker에서 증감 연산이 존재 하지 않아서 1씩 증감하는 로직을 추가 -> Scale out 일 때는 문제가 없음
-
-        # 진짜 문제는 Scale-in 쪽입니다 — current_worker_2_scale을 줄여서 --scale worker-2=1을 호출하면 Docker가 어떤 컨테이너를 죽일지 선택할 수 없어서, 작업 중인 컨테이너가 죽을 수 있는 것이죠.
-        # 그래서 현재 sleep으로 재우는 우회를 쓰고 계신 거고요.
-        
-
-        # subprocess를 이용해 명령 실행 후 출력과 결과를 반환받음
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"[Docker SDK CLI] 스케일링 완료 -> {service_name} 를 {target_count}대로 갱신.")
+def is_host_resource_sufficient():
+    """
+    [Global Host Resource Manager]
+    호스트 시스템의 실시간 물리 메모리 가용량을 점검하여 자원 임계치 안전 여부를 판정합니다.
+    """
+    try:
+        mem = psutil.virtual_memory()
+        available_gb = mem.available / (1024 ** 3)
+        if available_gb < 2.0:
+            print(f"[Global Resource Guard] 가용 물리 메모리 부족 경고: {available_gb:.2f} GB < 2.0 GB")
+            return False
         return True
     except Exception as e:
-        print(f"[Docker SDK CLI 에러] {service_name} 스케일링 실패: {e}")
+        print(f"[Global Resource Guard] 자원 점검 중 예외 발생: {e}")
+        return True
+
+
+def scale_out_worker(node_type):
+    """
+    [Docker SDK Container Run API]
+    Docker SDK를 사용하여 node_type에 기반한 신규 Spot 워커 노드를 동적으로 가동합니다.
+    - cGroup 격리 제한(cpus, memory limit), 네트워크 자동 매핑 및 볼륨 마운트가 이식됩니다.
+    """
+    if DOCKER_CLIENT is None:
+        print("[Docker SDK] 도커 데몬과 연결되어 있지 않아 동적 스케일아웃을 스킵합니다.")
+        return False
+
+    try:
+        spec = {
+            "spot_a": {
+                "nano_cpus": 1000000000, # 1.0 Core
+                "mem_limit": "1024m",
+                "port": 50060
+            },
+            "spot_b": {
+                "nano_cpus": 500000000,  # 0.5 Core
+                "mem_limit": "512m",
+                "port": 50070
+            }
+        }
+
+        if node_type not in spec:
+            print(f"[Docker SDK] 알 수 없는 노드 유형: {node_type}")
+            return False
+
+        node_spec = spec[node_type]
+
+        # 1. 호스트 자원 가드
+        if not is_host_resource_sufficient():
+            print("[Docker SDK] 호스트 물리 메모리 부족으로 스케일아웃 기동을 안전하게 거부합니다.")
+            return False
+
+        free_vram = get_gpu_free_memory()
+        if free_vram != -1 and free_vram < 500:
+            print(f"[Global Resource Guard] 가용 GPU VRAM 부족 ({free_vram} MiB < 500 MiB). 스케일아웃을 보류합니다.")
+            return False
+
+        # 2. 네트워크 자동 감지
+        network_name = "babyray-net"
+        try:
+            head_container = DOCKER_CLIENT.containers.get("babyray-head")
+            networks = head_container.attrs.get("NetworkSettings", {}).get("Networks", {})
+            if networks:
+                network_name = list(networks.keys())[0]
+                print(f"[Docker SDK] 자동 감지된 클러스터 네트워크: {network_name}")
+        except Exception as e:
+            print(f"[Docker SDK] 네트워크 자동 감지 실패, 기본값 '{network_name}' 사용: {e}")
+
+        # 3. 중복 포트 회피
+        with registry_lock:
+            existing_ports = [info["port"] for info in worker_registry.values()]
+
+        candidate_port = node_spec["port"]
+        while candidate_port in existing_ports:
+            candidate_port += 1
+
+        # 4. 고유 ID 및 컨테이너명 생성 (비어있는 가장 작은 순차 번호 탐색 및 재사용)
+        base_id = "worker-2" if node_type == "spot_a" else "worker-3"
+        
+        with registry_lock:
+            # 현재 GCS에 등록된 해당 노드 타입의 순차 인덱스 추출
+            existing_indices = []
+            for wid in worker_registry.keys():
+                name_part = wid.split("@")[0] if "@" in wid else wid
+                if name_part.startswith(base_id + "-"):
+                    try:
+                        idx = int(name_part.split("-")[-1])
+                        existing_indices.append(idx)
+                    except ValueError:
+                        pass
+            
+            # 1부터 시작하여 비어있는 가장 작은 번호(인덱스) 탐색 (Index Recycling)
+            candidate_index = 1
+            while candidate_index in existing_indices:
+                candidate_index += 1
+                
+        worker_id = f"{base_id}-{candidate_index}"
+        container_name = f"babyray-{worker_id}"
+
+        # 5. 실행 커맨드
+        cmd = [
+            "python", "-m", "worker.worker",
+            "--id", worker_id,
+            "--type", node_type,
+            "--port", str(candidate_port),
+            "--head-host", "babyray-head",
+            "--head-port", "50051"
+        ]
+
+        # GPU 요청 객체 빌드
+        device_requests = []
+        try:
+            device_requests = [
+                docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])
+            ]
+        except Exception:
+            device_requests = []
+
+        # 6. 컨테이너 동적 생성 및 실행 (분리된 Worker 이미지 사용)
+        DOCKER_CLIENT.containers.run(
+            image="babyray-worker-image:latest",
+            name=container_name,
+            command=cmd,
+            detach=True,
+            network=network_name,
+            nano_cpus=node_spec["nano_cpus"],
+            mem_limit=node_spec["mem_limit"],
+            device_requests=device_requests,
+            environment={
+                "NODE_TYPE": node_type,
+                "HEAD_HOST": "babyray-head",
+                "HEAD_PORT": "50051",
+                "PYTHONUNBUFFERED": "1"
+            }
+        )
+
+        print(f"[Docker SDK] 신규 Spot 컨테이너 가동 완료: ID='{worker_id}' | Name='{container_name}' | Port={candidate_port}")
+        return True
+
+    except Exception as e:
+        print(f"[Docker SDK 에러] 동적 스케일아웃 실행 실패: {e}")
+        return False
+
+
+def scale_in_specific_worker(node_type):
+    """
+    [Docker SDK Container Stop/Remove API]
+    GCS worker_registry에서 지정된 node_type 중 IDLE 상태인 워커를 선별하여 안전하게 종료 및 삭제합니다.
+    - OOM 이상 징후(메모리 사용률 90% 이상)가 감지된 노드가 있을 경우 우선적으로 회수 후보로 삼습니다.
+    """
+    if DOCKER_CLIENT is None:
+        print("[Docker SDK] 도커 데몬 미연결로 스케일인을 스킵합니다.")
+        return False
+
+    try:
+        target_worker_id = None
+        with registry_lock:
+            # IDLE 상태인 해당 타입의 워커들을 필터링
+            idle_workers = [
+                (wid, info) for wid, info in worker_registry.items()
+                if info["node_type"] == node_type and info["status"] == "IDLE"
+            ]
+            if idle_workers:
+                # 메모리 사용률이 높은 순(오버로드 상태)으로 정렬하여 1순위로 회수
+                idle_workers.sort(key=lambda x: x[1].get("mem", 0.0), reverse=True)
+                target_worker_id = idle_workers[0][0]
+
+        if target_worker_id is None:
+            print(f"[Docker SDK] 감축 경고: 회수 가능한 IDLE 상태의 {node_type} 워커가 존재하지 않습니다.")
+            return False
+
+        # worker-id format: worker-2-1 -> container name: babyray-worker-2-1
+        container_ref = f"babyray-{target_worker_id}"
+
+        # 1. Docker SDK를 통한 컨테이너 중지 및 제거
+        try:
+            container = DOCKER_CLIENT.containers.get(container_ref)
+            print(f"[Docker SDK] IDLE 컨테이너 회수 시작: {target_worker_id} (컨테이너 ID: {container_ref})")
+            container.stop(timeout=5)
+            container.remove()
+            print(f"[Docker SDK] IDLE 컨테이너 회수 성공: {target_worker_id}")
+        except Exception as e:
+            print(f"[Docker SDK 경고] 컨테이너 직접 조작 실패 ({e}), GCS 레지스트리만 소거 처리 진행.")
+
+        # 2. GCS 레지스트리에서 제거
+        with registry_lock:
+            if target_worker_id in worker_registry:
+                del worker_registry[target_worker_id]
+
+        return True
+
+    except Exception as e:
+        print(f"[Docker SDK 에러] 스케일인 수행 실패: {e}")
         return False
 
 
@@ -241,9 +444,9 @@ class BabyRayHeadServicer(babyray_pb2_grpc.BabyRayServiceServicer):
             return babyray_pb2.DeregisterResponse(success=False, message="Worker not found.")
 
     def SendHeartbeat(self, request, context):
-        # worker_id에서 컨테이너 식별자 파싱 (예: worker-2@8f219bf6a8c2 -> 8f219bf6a8c2)
-        container_identifier = request.worker_id.split("@")[-1] if "@" in request.worker_id else request.worker_id
-        real_cpu, real_mem = get_container_metrics(container_identifier)
+        # worker_id를 사용해 직접 도커 컨테이너 식별 (f"babyray-{worker_id}")
+        container_name = f"babyray-{request.worker_id}"
+        real_cpu, real_mem = get_container_metrics(container_name)
         
         with registry_lock:
             if request.worker_id in worker_registry:
@@ -310,14 +513,16 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                 with registry_lock:
                     if worker_id not in worker_registry:
                         raise grpc.RpcError("Worker node went offline during task execution.")
-                        
-                status_res = stub.GetTaskStatus(babyray_pb2.TaskStatusRequest(task_id=task_id))
                 
+                # 작업을 진행률을 받기
+                status_res = stub.GetTaskStatus(babyray_pb2.TaskStatusRequest(task_id=task_id))
+                # worker가 응답한 상태를 체크
                 if status_res.status in ["SUCCESS", "COMPLETED"]:
                     success = True
                     execution_time = time.time() - start_time
                     print(f"[Scheduler Feedback] 작업 {task_id} 완료 성공! (실제 수행 시간: {execution_time:.2f}초)")
                     break
+            
                 elif status_res.status == "FAILED":
                     success = False
                     execution_time = time.time() - start_time
@@ -391,9 +596,16 @@ def scheduler_loop():
     
     model_types = ["CNN", "RNN", "LSTM"]
     
+    # 최대 동적 워커 스케일 상한선 (Spot-A, Spot-B 각각 최대 5대 제한)
+    MAX_SPOT_SCALE = 5
+    
     # 초기 컨테이너 대수 세팅 (Compose 기본 스펙 기준)
-    current_worker_2_scale = 1
-    current_worker_3_scale = 1
+    # docker-compose.yml에서 spot 워커(worker-2, 3)는 주석 처리되어 있으므로 초기 기동 대수는 0대입니다.
+    current_worker_2_scale = 0
+    current_worker_3_scale = 0
+    
+    # 룰 기반 스케일인 타이머
+    empty_queue_duration = 0.0
     
     while True:
         time.sleep(4.0)  # 4초 주기 의사결정 루프
@@ -411,22 +623,59 @@ def scheduler_loop():
                 del worker_registry[wid]
 
         # --- 2. 주기적 랜덤 가상 태스크 자동 생성 및 큐 투입 (시뮬레이터 구동용) ---
-        if random.random() < 0.6:  # 60% 확률로 태스크 유입 모사
+        # 매 루프마다 80% 확률로 1~5개의 대량 태스크가 난수로 유입되어 부하를 극대화합니다.
+        if random.random() < 0.8:
+            num_new_tasks = random.randint(1, 5)
             with queue_lock:
-                if len(task_queue) < 10:
-                    task_counter += 1
-                    task_id = f"task-{task_counter:04d}"
-                    model = random.choice(model_types)
-                    # 5에포크 연산 지시, 마감 기한은 넉넉하게 20초~60초 랜덤 할당
-                    deadline = time.time() + random.randint(20, 60)
-                    task_queue.append({
-                        "task_id": task_id,
-                        "model_type": model,
-                        "epochs": 5,
-                        "deadline": deadline,
-                        "enqueue_time": time.time()
-                    })
-                    print(f"[Task 유입] {task_id} ({model}) 큐 적재 완료. (마감기한: {random.randint(20, 60)}초 후)")
+                # 큐 최대 제한을 50개로 확장하여 지속적인 병목 상태 유도
+                if len(task_queue) < 50:
+                    for _ in range(num_new_tasks):
+                        task_counter += 1
+                        task_id = f"task-{task_counter:04d}"
+                        model = random.choice(model_types)
+                        epochs = random.randint(5, 12)  # 에포크 수 난수화 (5~12 Epochs)
+                        timeout = random.randint(15, 35)  # 15~35초의 짧은 마감기한으로 스케일아웃을 강력 유도
+                        deadline = time.time() + timeout
+                        task_queue.append({
+                            "task_id": task_id,
+                            "model_type": model,
+                            "epochs": epochs,
+                            "deadline": deadline,
+                            "enqueue_time": time.time()
+                        })
+                        print(f"[Task 유입] {task_id} ({model}, {epochs} Epochs) 큐 적재 완료. (마감기한: {timeout}초 후)")
+
+        # --- 2.5. 룰 기반 Scale-In 감지 (Queue=0 & Avg CPU < 20% 지속) ---
+        with queue_lock:
+            q_len_for_scale_in = len(task_queue)
+            
+        if q_len_for_scale_in == 0:
+            with registry_lock:
+                active_workers = list(worker_registry.values())
+                if active_workers:
+                    avg_cpu = sum(info.get("cpu", 0.0) for info in active_workers) / len(active_workers)
+                else:
+                    avg_cpu = 0.0
+            
+            if avg_cpu < 20.0:
+                empty_queue_duration += 4.0
+            else:
+                empty_queue_duration = 0.0
+        else:
+            empty_queue_duration = 0.0
+            
+        if empty_queue_duration >= 10.0:
+            # 10초 지속 시 스케일 인 작동 (최소 1대 보장)
+            if current_worker_2_scale > 0:
+                print(f"[Auto Scaling] 룰 기반 Scale-In 작동 -> worker-2 (Spot-A) 1대 감축 시도")
+                if scale_in_specific_worker("spot_a"):
+                    current_worker_2_scale -= 1
+                    empty_queue_duration = 0.0
+            elif current_worker_3_scale > 0:
+                print(f"[Auto Scaling] 룰 기반 Scale-In 작동 -> worker-3 (Spot-B) 1대 감축 시도")
+                if scale_in_specific_worker("spot_b"):
+                    current_worker_3_scale -= 1
+                    empty_queue_duration = 0.0
 
         # --- 3. 강화학습 상태 ---
         with queue_lock:
@@ -451,16 +700,16 @@ def scheduler_loop():
         available_actions = [3]  # HOLD(3)는 상시 가용
         
         with registry_lock:
-            # 각 노드 타입별로 IDLE 상태인 워커가 최소 1개 이상 존재할 때 태스크 배정 허용
-            if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" for info in worker_registry.values()):
+            # 각 노드 타입별로 IDLE 상태인 워커가 최소 1개 이상 존재하고 메모리가 정상인 경우에만 허용
+            if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
                 available_actions.append(0)
-            if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" for info in worker_registry.values()):
+            if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
                 available_actions.append(1)
-            if any(info["node_type"] == "spot_b" and info["status"] == "IDLE" for info in worker_registry.values()):
+            if any(info["node_type"] == "spot_b" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
                 available_actions.append(2)
                 
-        # 최대 스케일 한도 내에서 SCALE_OUT(4) 기동 허용 (최대 Spot 각각 3대 제한)
-        if current_worker_2_scale < 3 or current_worker_3_scale < 3:
+        # 최대 스케일 한도 내에서 SCALE_OUT(4) 기동 허용 (최대 Spot 각각 MAX_SPOT_SCALE대 제한)
+        if current_worker_2_scale < MAX_SPOT_SCALE or current_worker_3_scale < MAX_SPOT_SCALE:
             available_actions.append(4)
 
         # Q-Learning 에이전트 액션 결정
@@ -476,9 +725,12 @@ def scheduler_loop():
             worker_id = None
             worker_info = None
             with registry_lock:
-                # 해당 타입에 해당하고 IDLE 상태인 워커를 찾아 선점
+                # 해당 타입에 해당하고 IDLE 상태이며 자원 한계 미만인 워커를 찾아 선점 (OOM 선제 회피)
                 for wid, info in worker_registry.items():
                     if info["node_type"] == target_type and info["status"] == "IDLE":
+                        if info.get("mem", 0.0) >= 90.0:
+                            print(f"[OOM 선제 회피] 워커 '{wid}'의 메모리가 임계치를 초과({info['mem']}%)하여 할당에서 차단합니다.")
+                            continue
                         worker_id = wid
                         worker_info = info.copy()
                         worker_registry[wid]["status"] = "BUSY"
@@ -492,7 +744,7 @@ def scheduler_loop():
                     daemon=True
                 ).start()
             else:
-                # 노드가 갑자기 끊긴 경우 작업을 다시 큐로 반환
+                # 노드가 갑자기 끊겼거나 할당 불가능한 상황인 경우 작업을 다시 큐로 반환
                 with queue_lock:
                     task_queue.insert(0, target_task)
 
@@ -501,21 +753,23 @@ def scheduler_loop():
             print(f"[Scheduler Action] HOLD 상태 선택 (대기열 크기: {q_len} | 대기 페널티 발생 가능)")
             
         elif action == 4:
-            # SCALE_OUT 액션: Docker compose를 통한 Spot 컨테이너 동적 증설 트리거
-            # 큐 부하량이 많은 Spot 노드를 선정해 스케일아웃
-            if current_worker_2_scale <= current_worker_3_scale and current_worker_2_scale < 3:
-                current_worker_2_scale += 1
-                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-2 (Spot-A) 대수 증설 지시 ({current_worker_2_scale}대)")
-                scale_workers("worker-2", current_worker_2_scale)
-            elif current_worker_3_scale < 3:
-                current_worker_3_scale += 1
-                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-3 (Spot-B) 대수 증설 지시 ({current_worker_3_scale}대)")
-                scale_workers("worker-3", current_worker_3_scale)
+            # SCALE_OUT 액션: Docker SDK를 통한 Spot 컨테이너 동적 증설 트리거
+            if current_worker_2_scale <= current_worker_3_scale and current_worker_2_scale < MAX_SPOT_SCALE:
+                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-2 (Spot-A) 대수 증설 지시")
+                if scale_out_worker("spot_a"):
+                    current_worker_2_scale += 1
+            elif current_worker_3_scale < MAX_SPOT_SCALE:
+                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-3 (Spot-B) 대수 증설 지시")
+                if scale_out_worker("spot_b"):
+                    current_worker_3_scale += 1
 
 
 # --- 6. Head Node 메인 구동 루프 ---
 
 def serve():
+    # 0. 잔존 좀비 컨테이너 비동기 청소 (부팅 블로킹 방지 및 자원 회수 보장)
+    threading.Thread(target=cleanup_zombie_containers, daemon=True).start()
+    
     port = os.environ.get("HEAD_PORT", str(DEFAULT_HEAD_PORT))
     
     # gRPC 서버 기동 (동시 접속 스레드풀 설정)

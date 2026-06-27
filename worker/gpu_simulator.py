@@ -1,4 +1,8 @@
 import time
+import random
+
+# 가상 OOM 시뮬레이션 플래그
+oom_simulated = False
 
 # PyTorch 라이브러리 임포트 시도 (에러 발생 시 더미 연산 Fallback을 사용하기 위함)
 try:
@@ -222,6 +226,22 @@ class PyTorchTaskRunner:
         print(f"\n[Worker Task] 작업 시작: {self.task_id} (모델: {self.model_type}, 노드타입: {self.worker_type}, 속도배수: {self.speed_factor})")
         start_time = time.time()
         
+        # 가상 OOM 장애 주입 모사
+        is_oom_trigger = False
+        if self.model_type.upper() == "LSTM" and random.random() < 0.15:
+            is_oom_trigger = True
+        elif "fail" in self.task_id.lower():
+            is_oom_trigger = True
+            
+        if is_oom_trigger:
+            print(f"\n[Worker Simulation] !!! 가상 OOM 장애 유입 감지 !!! (Task: {self.task_id})")
+            global oom_simulated
+            oom_simulated = True
+            self.status = "FAILED"
+            self.logs.append("OOM Exception simulated: cGroup memory limit exceeded.")
+            print("[Worker Simulation] cGroup 메모리 제한 초과로 강제 실패 처리 완료.")
+            return
+
         # 디바이스 결정 (CUDA 사용 가능 여부 확인)
         device = "cuda" if (HAS_TORCH and torch.cuda.is_available()) else "cpu"
         print(f"[Worker Task] 구동 디바이스: {device}")

@@ -156,6 +156,12 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
                     # Fallback: 호스트 기준 가상 메모리 사용률
                     mem_util = psutil.virtual_memory().percent
             
+            # 가상 OOM 장애 모사 상태 체크
+            import gpu_simulator
+            if getattr(gpu_simulator, "oom_simulated", False):
+                cpu_util = 1.5
+                mem_util = 99.9
+
             # 실시간 자원 수치 송신
             stub.SendHeartbeat(babyray_pb2.HeartbeatRequest(
                 worker_id=worker_id,
@@ -218,7 +224,7 @@ if __name__ == '__main__':
     parser.add_argument("--head-port", type=int, default=int(os.environ.get("HEAD_PORT", 50051)), help="Head node port")
     
     args = parser.parse_args()
-    # 컨테이너 호스트명(Container ID)을 결합하여 고유 ID 보장
-    unique_worker_id = f"{args.id}@{socket.gethostname()}"
+    # 순차 할당된 ID 자체가 고유하므로 접미사 생략
+    unique_worker_id = args.id
     serve(unique_worker_id, args.type, args.port, args.head_host, args.head_port)
 # python worker.py --id worker-02 --port 50053 --type spot -> serve 함수 구동

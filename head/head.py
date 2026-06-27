@@ -139,11 +139,6 @@ def scale_out_worker(node_type):
                 "nano_cpus": 1000000000, # 1.0 Core
                 "mem_limit": "1024m",
                 "port": 50060
-            },
-            "spot_b": {
-                "nano_cpus": 500000000,  # 0.5 Core
-                "mem_limit": "512m",
-                "port": 50070
             }
         }
 
@@ -183,7 +178,7 @@ def scale_out_worker(node_type):
             candidate_port += 1
 
         # 4. 고유 ID 및 컨테이너명 생성 (비어있는 가장 작은 순차 번호 탐색 및 재사용)
-        base_id = "worker-2" if node_type == "spot_a" else "worker-3"
+        base_id = "worker-2"
         
         with registry_lock:
             # 현재 GCS에 등록된 해당 노드 타입의 순차 인덱스 추출
@@ -568,8 +563,7 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         with registry_lock:
             w1_act = 1 if any(info["node_type"] == "on_demand" for info in worker_registry.values()) else 0
             w2_act = 1 if any(info["node_type"] == "spot_a" for info in worker_registry.values()) else 0
-            w3_act = 1 if any(info["node_type"] == "spot_b" for info in worker_registry.values()) else 0
-            active_bitmap_next = (w1_act * 1) + (w2_act * 2) + (w3_act * 4)
+            active_bitmap_next = (w1_act * 1) + (w2_act * 2)
             
         budget_level_next = 0 if virtual_budget < 20.0 else (1 if virtual_budget < 70.0 else 2)
         next_state = (q_len_next, active_bitmap_next, budget_level_next)
@@ -596,31 +590,31 @@ def scheduler_loop():
     
     model_types = ["CNN", "RNN", "LSTM"]
     
-    # 최대 동적 워커 스케일 상한선 (Spot-A, Spot-B 각각 최대 5대 제한)
-    MAX_SPOT_SCALE = 5
+    # 최대 동적 워커 스케일 상한선 (Spot-A 단일 타입 최대 30대 제한)
+    MAX_SPOT_SCALE = 30
     
     # 초기 컨테이너 대수 세팅 (Compose 기본 스펙 기준)
     # docker-compose.yml에서 spot 워커(worker-2, 3)는 주석 처리되어 있으므로 초기 기동 대수는 0대입니다.
     current_worker_2_scale = 0
-    current_worker_3_scale = 0
     
     # 룰 기반 스케일인 타이머
     empty_queue_duration = 0.0
     
     while True:
-        time.sleep(4.0)  # 4초 주기 의사결정 루프
+        time.sleep(1.0)  # 1초 주기 의사결정 루프
         
         # --- 1. DEAD 노드 헬스체크 및 격리 제거 ---
         current_time = time.time()
         dead_workers = []
         with registry_lock:
+            # wid = worker id / info 정보 내역 중에서 last_heartbeat 값 참고
             for wid, info in list(worker_registry.items()):
                 # 하트비트 수신이 15.0초 동안 끊어지면 사망 판정
                 if current_time - info["last_heartbeat"] > 15.0:
                     dead_workers.append(wid)
             for wid in dead_workers:
                 print(f"[Scheduler GCS] [DEAD 노드 감지] {wid} 노드가 오프라인 처리되었습니다.")
-                del worker_registry[wid]
+                del worker_registry[wid] # dead 된 워커의 정보를 레지스트리에서 완전히 삭제 
 
         # --- 2. 주기적 랜덤 가상 태스크 자동 생성 및 큐 투입 (시뮬레이터 구동용) ---
         # 매 루프마다 80% 확률로 1~5개의 대량 태스크가 난수로 유입되어 부하를 극대화합니다.
@@ -658,110 +652,104 @@ def scheduler_loop():
                     avg_cpu = 0.0
             
             if avg_cpu < 20.0:
-                empty_queue_duration += 4.0
+                empty_queue_duration += 1.0
             else:
                 empty_queue_duration = 0.0
         else:
             empty_queue_duration = 0.0
             
         if empty_queue_duration >= 10.0:
-            # 10초 지속 시 스케일 인 작동 (최소 1대 보장)
+            # 10초 지속 시 스케일 인 작동 (자원 완전 회수)
             if current_worker_2_scale > 0:
                 print(f"[Auto Scaling] 룰 기반 Scale-In 작동 -> worker-2 (Spot-A) 1대 감축 시도")
                 if scale_in_specific_worker("spot_a"):
                     current_worker_2_scale -= 1
                     empty_queue_duration = 0.0
-            elif current_worker_3_scale > 0:
-                print(f"[Auto Scaling] 룰 기반 Scale-In 작동 -> worker-3 (Spot-B) 1대 감축 시도")
-                if scale_in_specific_worker("spot_b"):
-                    current_worker_3_scale -= 1
-                    empty_queue_duration = 0.0
 
-        # --- 3. 강화학습 상태 ---
-        with queue_lock:
-            q_len = min(len(task_queue), 10)
-            
-        with registry_lock:
-            w1_act = 1 if any(info["node_type"] == "on_demand" for info in worker_registry.values()) else 0
-            w2_act = 1 if any(info["node_type"] == "spot_a" for info in worker_registry.values()) else 0
-            w3_act = 1 if any(info["node_type"] == "spot_b" for info in worker_registry.values()) else 0
-            active_bitmap = (w1_act * 1) + (w2_act * 2) + (w3_act * 4)
-            
-        # 예산 레벨 이산화
-        budget_level = 0 if virtual_budget < 20.0 else (1 if virtual_budget < 70.0 else 2)
-        state = (q_len, active_bitmap, budget_level)
-
-        if q_len == 0:
-            # 대기 중인 작업이 없으면 의사결정 없이 대기
-            continue
-
-        # --- 4. 행동 공간(Action Space) 가용 액션 필터링 ---
-        # 0: Assign W1, 1: Assign W2, 2: Assign W3, 3: Hold, 4: Scale Out
-        available_actions = [3]  # HOLD(3)는 상시 가용
-        
-        with registry_lock:
-            # 각 노드 타입별로 IDLE 상태인 워커가 최소 1개 이상 존재하고 메모리가 정상인 경우에만 허용
-            if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
-                available_actions.append(0)
-            if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
-                available_actions.append(1)
-            if any(info["node_type"] == "spot_b" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
-                available_actions.append(2)
-                
-        # 최대 스케일 한도 내에서 SCALE_OUT(4) 기동 허용 (최대 Spot 각각 MAX_SPOT_SCALE대 제한)
-        if current_worker_2_scale < MAX_SPOT_SCALE or current_worker_3_scale < MAX_SPOT_SCALE:
-            available_actions.append(4)
-
-        # Q-Learning 에이전트 액션 결정
-        action = agent.choose_action(state, available_actions)
-
-        # --- 5. 의사결정 액션 실행 제어 ---
-        if action in [0, 1, 2]:
-            # 태스크 할당 처리
-            target_type = ["on_demand", "spot_a", "spot_b"][action]
+        # --- 3. 다중 배정(Multi-Dispatch) 의사결정 서브 루프 ---
+        while True:
             with queue_lock:
-                target_task = task_queue.pop(0)  # FIFO 큐 선입선출
+                q_len_real = len(task_queue)
+            if q_len_real == 0:
+                break
                 
-            worker_id = None
-            worker_info = None
+            q_len = min(q_len_real, 10)
             with registry_lock:
-                # 해당 타입에 해당하고 IDLE 상태이며 자원 한계 미만인 워커를 찾아 선점 (OOM 선제 회피)
-                for wid, info in worker_registry.items():
-                    if info["node_type"] == target_type and info["status"] == "IDLE":
-                        if info.get("mem", 0.0) >= 90.0:
-                            print(f"[OOM 선제 회피] 워커 '{wid}'의 메모리가 임계치를 초과({info['mem']}%)하여 할당에서 차단합니다.")
-                            continue
-                        worker_id = wid
-                        worker_info = info.copy()
-                        worker_registry[wid]["status"] = "BUSY"
-                        break
-            
-            if worker_info:
-                # 비동기 스레드를 실행하여 gRPC 작업 전달 및 갱신 수행
-                threading.Thread(
-                    target=run_task_on_worker,
-                    args=(worker_id, worker_info, target_task, state, action),
-                    daemon=True
-                ).start()
-            else:
-                # 노드가 갑자기 끊겼거나 할당 불가능한 상황인 경우 작업을 다시 큐로 반환
-                with queue_lock:
-                    task_queue.insert(0, target_task)
+                w1_act = 1 if any(info["node_type"] == "on_demand" for info in worker_registry.values()) else 0
+                w2_act = 1 if any(info["node_type"] == "spot_a" for info in worker_registry.values()) else 0
+                active_bitmap = (w1_act * 1) + (w2_act * 2)
+                
+            # 예산 레벨 이산화
+            budget_level = 0 if virtual_budget < 20.0 else (1 if virtual_budget < 70.0 else 2)
+            state = (q_len, active_bitmap, budget_level)
 
-        elif action == 3:
-            # HOLD 액션: 대기
-            print(f"[Scheduler Action] HOLD 상태 선택 (대기열 크기: {q_len} | 대기 페널티 발생 가능)")
+            # --- 4. 행동 공간(Action Space) 가용 액션 필터링 ---
+            available_actions = [3]  # HOLD(3)는 상시 가용
             
-        elif action == 4:
-            # SCALE_OUT 액션: Docker SDK를 통한 Spot 컨테이너 동적 증설 트리거
-            if current_worker_2_scale <= current_worker_3_scale and current_worker_2_scale < MAX_SPOT_SCALE:
-                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-2 (Spot-A) 대수 증설 지시")
-                if scale_out_worker("spot_a"):
-                    current_worker_2_scale += 1
-            elif current_worker_3_scale < MAX_SPOT_SCALE:
-                print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-3 (Spot-B) 대수 증설 지시")
-                if scale_out_worker("spot_b"):
-                    current_worker_3_scale += 1
+            with registry_lock:
+                # 각 노드 타입별로 IDLE 상태인 워커가 최소 1개 이상 존재하고 메모리가 정상인 경우에만 허용
+                if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
+                    available_actions.append(0)
+                if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" and info.get("mem", 0.0) < 90.0 for info in worker_registry.values()):
+                    available_actions.append(1)
+                    
+            # 최대 스케일 한도 내에서 SCALE_OUT(4) 기동 허용
+            if current_worker_2_scale < MAX_SPOT_SCALE:
+                available_actions.append(4)
+
+            # 가용한 행동이 오직 HOLD(3) 뿐이라면 더 분배할 자원이 없으므로 루프를 즉시 탈출
+            if available_actions == [3]:
+                break
+
+            # Q-Learning 에이전트 액션 결정
+            action = agent.choose_action(state, available_actions)
+
+            # --- 5. 의사결정 액션 실행 제어 ---
+            if action in [0, 1, 2]:
+                # 태스크 할당 처리 (2번 액션이 들어올 경우 안전하게 spot_a로 우회 처리)
+                target_type = ["on_demand", "spot_a", "spot_a"][action]
+                with queue_lock:
+                    target_task = task_queue.pop(0)  # FIFO 큐 선입선출
+                    
+                worker_id = None
+                worker_info = None
+                with registry_lock:
+                    # 해당 타입에 해당하고 IDLE 상태이며 자원 한계 미만인 워커를 찾아 선점 (OOM 선제 회피)
+                    for wid, info in worker_registry.items():
+                        if info["node_type"] == target_type and info["status"] == "IDLE":
+                            if info.get("mem", 0.0) >= 90.0:
+                                print(f"[OOM 선제 회피] 워커 '{wid}'의 메모리가 임계치를 초과({info['mem']}%)하여 할당에서 차단합니다.")
+                                continue
+                            worker_id = wid
+                            worker_info = info.copy()
+                            worker_registry[wid]["status"] = "BUSY"
+                            break
+                
+                if worker_info:
+                    # 비동기 스레드를 실행하여 gRPC 작업 전달 및 갱신 수행
+                    threading.Thread(
+                        target=run_task_on_worker,
+                        args=(worker_id, worker_info, target_task, state, action),
+                        daemon=True
+                    ).start()
+                else:
+                    # 노드가 갑자기 끊겼거나 할당 불가능한 상황인 경우 작업을 다시 큐로 반환하고 루프 탈출
+                    with queue_lock:
+                        task_queue.insert(0, target_task)
+                    break
+                
+            elif action == 3:
+                # HOLD 액션: 대기 페널티를 받으며 틱 마감
+                print(f"[Scheduler Action] HOLD 상태 선택 (대기열 크기: {q_len} | 대기 페널티 발생 가능)")
+                break
+                
+            elif action == 4:
+                # SCALE_OUT 액션: Docker SDK를 통한 Spot 컨테이너 동적 증설 트리거 (워커 구동을 기다리기 위해 루프 탈출)
+                if current_worker_2_scale < MAX_SPOT_SCALE:
+                    print(f"[Scheduler Action] SCALE_OUT 트리거 -> worker-2 (Spot-A) 대수 증설 지시")
+                    if scale_out_worker("spot_a"):
+                        current_worker_2_scale += 1
+                break
 
 
 # --- 6. Head Node 메인 구동 루프 ---

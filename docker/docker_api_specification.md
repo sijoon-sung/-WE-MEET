@@ -150,37 +150,38 @@ def resize_container_resources(container_name, cpu_cores, memory_bytes):
 
 ---
 
-### 라. Auto Scaling 동적 증설 및 회수 API (`scale_workers`)
-- **역할**: Q-Learning 에이전트가 `Action.SCALE_OUT` 결정을 내리거나, 로드밸런싱 필요 시 Docker Compose 명령어를 자식 프로세스로 호출하여 노드 개수를 스케일 인/아웃(Scale-in/out) 제어합니다.
+### 라. Auto Scaling 동적 증설 및 회수 API (`scale_out_worker` / `scale_in_specific_worker`)
+- **역할**: Q-Learning 에이전트의 결정에 따라 자식 프로세스 명령어 호출 없이, Python Docker SDK 라이브러리를 직접 호출하여 컨테이너를 동적으로 가동(`containers.run`)하고 제거(`stop` & `remove`)합니다.
 
 ```python
-import subprocess
+```python
+def scale_out_worker(node_type):
+    """
+    Docker SDK(containers.run)를 직접 호출하여 Spot-A 워커 노드를 동적으로 띄웁니다.
+    - cGroup 격리 제한(cpus, memory limit)을 실시간으로 지정합니다.
+    - 순차 인덱스 규칙(worker-2-1 ~ worker-2-30)을 탐색하여 컨테이너 이름을 자동 부여합니다.
+    """
+    # ... docker.types.DeviceRequest를 활용한 GPU 바인딩 및 컨테이너 run 구동 ...
+    DOCKER_CLIENT.containers.run(
+        image="babyray-worker-image:latest",
+        name=container_name,
+        command=cmd,
+        detach=True,
+        network=network_name,
+        nano_cpus=node_spec["nano_cpus"],
+        mem_limit=node_spec["mem_limit"],
+        device_requests=device_requests,
+        environment=env_variables
+    )
 
-def scale_workers(service_name, target_count):
+def scale_in_specific_worker(node_type):
     """
-    docker-compose CLI 명령어를 실행하여 해당 워커 서비스 컨테이너 인스턴스를 지정된 개수로 증설하거나 축소합니다.
+    GCS에서 IDLE 상태인 스팟 워커 중 메모리 오버로드(90% 이상) 조짐이 있거나 유휴 중인 대상 컨테이너를 탐색합니다.
+    - Docker SDK를 통해 container.stop(timeout=5) 및 container.remove()를 수행하여 호스트 자원을 완전 해제합니다.
     """
-    try:
-        # CLI 명령 구문을 파이썬의 리스트 포맷으로 정의합니다.
-        # -f 옵션으로 docker-compose.yml의 상대 위치를 지정해 줍니다.
-        # --scale 옵션을 통해 (예: worker-2=3) 해당 서비스의 컨테이너 활성 개수를 통제합니다.
-        cmd = [
-            "docker", "compose", 
-            "-f", "docker/docker-compose.yml", 
-            "up", "-d", 
-            "--scale", f"{service_name}={target_count}"
-        ]
-        
-        # subprocess.run()을 사용하여 서브 프로세스 쉘에서 도커 컴포즈 CLI 명령어를 구동시킵니다.
-        # - capture_output=True: 명령어 실행 결과(stdout, stderr)를 파이썬 변수로 받아옵니다.
-        # - check=True: 명령어 오류 코드 반환 시 CalledProcessError 예외를 강제 발생시켜 안전한 예외 제어를 돕습니다.
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"[Docker SDK CLI] 스케일링 명령 수행 성공 -> {service_name} 를 {target_count}대로 갱신.")
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        print(f"[Docker SDK CLI] 스케일링 수행 에러: {e.stderr}")
-        return False
+    container = DOCKER_CLIENT.containers.get(container_ref)
+    container.stop(timeout=5)
+    container.remove()
 ```
 
 ---
@@ -202,18 +203,18 @@ Docker SDK가 제어하는 `nano_cpus` 및 `mem_limit` 파라미터는 리눅스
 스케줄러 루프 내에서 본 명세서의 Docker API가 호출되는 동작 시나리오와 흐름 제어 아키텍처입니다.
 
 ```
-[태스크 대기열(Task Queue) 폭증 감지 (5개 초과 지속)]
+[태스크 대기열(Task Queue) 병목 감지 및 자원 부족]
                    │
                    ▼ (q_learning.py 의사결정)
 [Action.SCALE_OUT 액션 도출]
                    │
                    ▼ (head.py 스케줄러 루프)
-[scale_workers("worker-2", target_count) 호출]
+[scale_out_worker("spot_a") 호출]
                    │
-                   ▼ (Docker SDK CLI 명령어 구동)
-[docker compose up -d --scale worker-2=N]
+                   ▼ (Docker SDK 라이브러리 직접 구동)
+[DOCKER_CLIENT.containers.run() 실행]
                    │
-                   ▼ (신규 Spot Worker 컨테이너 기동)
+                   ▼ (신규 Spot-A Worker 컨테이너 기동 - 순차 인덱스 부여)
 [Worker 컨테이너 내 gRPC 통신 서버 초기 구동]
                    │
                    ▼ (worker.py의 heartbeat_sender 스레드)
@@ -222,3 +223,30 @@ Docker SDK가 제어하는 `nano_cpus` 및 `mem_limit` 파라미터는 리눅스
                    ▼ (head.py 가 수집 및 상태 등록 완료)
 [신규 가용 노드 등록 완료 및 Task 큐 처리 재개]
 ```
+
+---
+
+## 5. 추가적인 Docker SDK 리소스 보호 및 관리 API
+
+클러스터 기동 및 가속 연산 시 물리 호스트에 가해지는 과도한 컨테이너 오버헤드를 막고 안정성을 확보하기 위해, 다음과 같은 Docker SDK 제어 및 시스템 격리 방어 API들이 통합 구현되어 있습니다.
+
+### ① 비동기 좀비 컨테이너 소거 API (`cleanup_zombie_containers`)
+- **설계 의도**: GCS 오동작이나 비정상 셧다운으로 호스트 도커 엔진에 고아(Orphan) 상태로 무한 구동 중이던 구버전 스팟 컨테이너들을 정비하여 물리 메모리 누수를 완전히 차단합니다.
+- **동작 방식**: 
+  - `client.containers.list(all=True)` API를 호출해 `babyray-worker-` 프리픽스를 지닌 컨테이너를 탐색합니다.
+  - 검출 즉시 백그라운드 스레드에서 비동기로 `container.remove(force=True)`를 연쇄 호출하여, gRPC 연결 초기 병목(3초 지연)을 전면 제거하고 부팅 즉시 정상 구동되도록 유도합니다.
+
+### ② 호스트 가용 메모리 계측 가드 (`is_host_resource_sufficient`)
+- **설계 의도**: Docker SDK의 `containers.run`을 다중 실행할 시, 호스트 실제 물리 메모리가 한계에 도달해 가상 머신(WSL2) 및 윈도우 OS 커널이 얼어붙는 현상을 방지합니다.
+- **동작 방식**: 스케일아웃 실행 전 `psutil.virtual_memory().available` 가 가상 임계치인 **2.0 GB** 아래로 떨어질 경우 도커 컨테이너 기동을 강제 차단 및 예외 보류시킵니다.
+
+### ③ GPU VRAM 감지 및 스케일아웃 제어 (`get_gpu_free_memory`)
+- **설계 의도**: `torch.cuda.is_available()` 상태에서 여러 컨테이너에 GPU 패스스루를 지정할 때, 물리 VRAM(8GB)이 고갈되어 CUDA 드라이버 패닉이 유발되는 것을 선제 예방합니다.
+- **동작 방식**: 스케일아웃 전에 가용 VRAM 용량이 **500 MiB 미만**인 지점을 스캔하여, 부족할 경우 컨테이너 생성 단계에서 기동을 세이프 홀딩합니다.
+
+### ④ 포트 충돌 방지 및 ID 번호 재사용 (Index Recycling)
+- **설계 의도**: 동적 노드 관리 시 포트 매핑 충돌이나 도커 컨테이너 이름 중복으로 인해 `containers.run` 호출 자체가 실패하는 도커 엔진 레벨의 예외를 사전 방지합니다.
+- **동작 방식**: 
+  - GCS 레지스트리의 포트를 전수 비교하여 `candidate_port += 1`로 포트 바인딩 중복을 회피합니다.
+  - `existing_indices`를 계산하여 감축된 노드 번호 중 비어 있는 가장 작은 양의 정수를 찾아 컨테이너명(`babyray-worker-2-x`)으로 우선 선점 및 재사용합니다.
+

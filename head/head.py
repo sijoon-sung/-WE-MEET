@@ -616,6 +616,20 @@ def scheduler_loop():
                 print(f"[Scheduler GCS] [DEAD 노드 감지] {wid} 노드가 오프라인 처리되었습니다.")
                 del worker_registry[wid] # dead 된 워커의 정보를 레지스트리에서 완전히 삭제 
 
+        # Docker 컨테이너 실질적 회수 (락 바깥에서 진행하여 블로킹 방지)
+        for wid in dead_workers:
+            if wid.startswith("worker-2-") or wid.startswith("worker-3-"):
+                container_ref = f"babyray-{wid}"
+                try:
+                    if DOCKER_CLIENT is not None:
+                        container = DOCKER_CLIENT.containers.get(container_ref)
+                        print(f"[Docker SDK] DEAD 컨테이너 회수 시작: {container_ref}")
+                        container.stop(timeout=2)
+                        container.remove()
+                        print(f"[Docker SDK] DEAD 컨테이너 회수 성공: {container_ref}")
+                except Exception as e:
+                    print(f"[Docker SDK 경고] DEAD 컨테이너 {container_ref} 회수 실패 (이미 종료되었거나 접근 불가능): {e}")
+
         # --- 2. 주기적 랜덤 가상 태스크 자동 생성 및 큐 투입 (시뮬레이터 구동용) ---
         # 매 루프마다 80% 확률로 1~5개의 대량 태스크가 난수로 유입되어 부하를 극대화합니다.
         if random.random() < 0.8:

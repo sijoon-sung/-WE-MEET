@@ -17,11 +17,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # 호스트 Docker 데몬 연동
     ports:
       - "50051:50051" # gRPC 포트
+      - "8080:8080"   # 모니터링 대시보드 포트 추가
     networks:
       - babyray-net
     environment:
       - NODE_TYPE=head
       - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
 
   # On-Demand 노드 (2 Cores, 2GB Memory, GPU 1.0 배율)
   worker-1:

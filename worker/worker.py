@@ -23,13 +23,33 @@ from gpu_simulator import PyTorchTaskRunner
 # --- 1. Worker gRPC 서비스 서버 구현 ---
 
 class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
+    """
+    Baby Ray Worker Node의 gRPC 서비스 처리를 전담하는 서비서 클래스입니다.
+    Head로부터의 작업 할당 및 상태 확인 요청에 대응합니다.
+    """
     def __init__(self, worker_type):
+        """
+        BabyRayWorkerServicer 인스턴스를 초기화합니다.
+
+        Args:
+            worker_type (str): 워커 노드 유형 ("on_demand" / "spot_a").
+        """
         self.worker_type = worker_type # worker의 종류
         self.current_task_id = None #작업 ID를 저장
         self.runner = None # 실제 수행할 객체 - PyTorchTaskRunner.py에 있는 클래스
         self.lock = threading.Lock() # 여러 스레드가 동시에 변수를 건드리지 못하게 막는 race condition 방지
 
     def AssignTask(self, request, context):
+        """
+        새로운 AI 연산 작업을 할당받아 백그라운드 스레드에서 비동기로 실행합니다.
+
+        Args:
+            request (TaskAssignment): 할당받을 작업 정보가 담긴 요청 메시지.
+            context (grpc.ServicerContext): gRPC 서비스 컨텍스트.
+
+        Returns:
+            TaskResult: 작업 할당 결과 메시지 (RUNNING 또는 FAILED).
+        """
         with self.lock: # 안에 있는 critical section에 mutual exclusion 보장
             # 1. 중복 검사: 이미 작업 ID가 있고, 그 작업이 'RUNNING' 상태라면
             if self.current_task_id is not None and self.runner.status == "RUNNING":
@@ -67,6 +87,16 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
 
     # 작업 상태 조회
     def GetTaskStatus(self, request, context):
+        """
+        현재 수행 중인 AI 연산 작업의 상태 및 진행 로그를 반환합니다.
+
+        Args:
+            request (TaskStatusRequest): 확인할 작업 ID 정보.
+            context (grpc.ServicerContext): gRPC 서비스 컨텍스트.
+
+        Returns:
+            TaskStatusResponse: 작업 진행 상태, 진행률 및 학습 로그 문자열.
+        """
         with self.lock: #mutual exclusion 보장
             # 현재 실행 중인 작업이 없거나, 작업 ID가 요청과 다르면
             if self.runner is None or self.runner.task_id != request.task_id:
@@ -84,6 +114,16 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
             
     # request - 클라이언트가 보낸 자원 크기
     def ResizeResources(self, request, context):
+        """
+        워커 노드의 cGroup 자원 격리 한도를 동적으로 조정합니다 (현재 스펙 정의용).
+
+        Args:
+            request (ResizeRequest): 변경할 CPU 코어 수 및 메모리 용량.
+            context (grpc.ServicerContext): gRPC 서비스 컨텍스트.
+
+        Returns:
+            ResizeResponse: 조정 성공 여부 메시지.
+        """
         print(f"[Worker gRPC] 자원 크기 조절 요청 수신: CPU={request.cpu_cores} Cores, Mem={request.memory_bytes} Bytes")
         # response - 헤드에게 보내는 답변
         return babyray_pb2.ResizeResponse(
@@ -95,6 +135,16 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
 # --- 2. 하트비트 송신 클라이언트 루프 (Head로 전송) ---
 
 def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
+    """
+    주기적으로 Head Node로 생존 신고 및 자원 상태(CPU/메모리) 메트릭을 송신하는 루프입니다.
+
+    Args:
+        worker_id (str): 현재 워커 노드 고유 ID.
+        node_type (str): 현재 워커 노드 유형 ("on_demand" / "spot_a").
+        port (int): 현재 워커 노드의 수신 대기 gRPC 포트 번호.
+        head_host (str): Head Node의 호스트명/IP 주소.
+        head_port (int): Head Node의 gRPC 서버 포트 번호.
+    """
     time.sleep(1.0) # Worker 자체 gRPC 서버가 부팅될 때까지 1초 대기
     
     head_address = f"{head_host}:{head_port}" # Head 노드의 주소(IP:Port)를 만듭니다.
@@ -181,6 +231,17 @@ def heartbeat_sender_loop(worker_id, node_type, port, head_host, head_port):
 # --- 3. Worker 메인 구동 루프 ---
 
 def serve(worker_id, node_type, port, head_host, head_port):
+    """
+    Worker Node 메인 데몬 서버를 구동합니다.
+    자체 gRPC 수신 대기 서버를 실행하고, Head Node에 주기적으로 하트비트를 송신하는 스레드를 가동합니다.
+
+    Args:
+        worker_id (str): 워커 고유 ID.
+        node_type (str): 워커 유형 ("on_demand" / "spot_a").
+        port (int): 워커가 gRPC 수신 대기할 포트 번호.
+        head_host (str): Head Node의 호스트명/IP 주소.
+        head_port (int): Head Node의 gRPC 수신 포트 번호.
+    """
     # 1. Head의 명령을 수신받을 Worker 자체 gRPC 서버 실행
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=3)) #Head로 부터 요청이 병목이 생기지 않도록 스레드 3개を用意
     servicer = BabyRayWorkerServicer(worker_type=node_type) # Worker 서버 객체 생성

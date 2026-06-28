@@ -11,12 +11,37 @@ class QLearningAgent:
     """
     대기 태스크 큐 상태, 활성 노드 풀 상황, 잔여 가상 예산을 기반으로
     가장 비용 효율적이면서도 마감 시한(Deadline)을 지킬 수 있는 스케줄링 행동을 학습하는 에이전트.
+
+    Attributes:
+        alpha (float): 학습률 (Learning Rate).
+        gamma (float): 미래 보상 할인율 (Discount Factor).
+        epsilon (float): 현재 탐험율 (Exploration Rate).
+        epsilon_min (float): 최소 탐험율 (Exploration Limit).
+        decay_rate (float): 탐험율 감쇄율 (Decay rate per update step).
+        q_table_path (str): Q-Table 저장 파일 경로.
+        q_table (dict): 상태-행동 Q-Value 매핑 테이블.
+        nodes_config (dict): 비용 모델 및 성능 격차 설정 딕셔너리.
+        actions (list): 가용한 행동 공간 리스트.
     """
     def __init__(self, cost_model_path=None, q_table_path="q_table.json",
-                 alpha=0.1, gamma=0.9, epsilon=0.15):
+                 alpha=0.1, gamma=0.9, epsilon=1.0, epsilon_min=0.05, decay_rate=0.995):
+        """
+        QLearningAgent 인스턴스를 초기화하고 요금제 프로파일 및 Q-Table을 로드합니다.
+
+        Args:
+            cost_model_path (str, optional): YAML 비용 프로파일 파일 경로. Defaults to None.
+            q_table_path (str, optional): 저장/로드할 Q-Table JSON 파일 경로. Defaults to "q_table.json".
+            alpha (float, optional): 학습률. Defaults to 0.1.
+            gamma (float, optional): 할인율. Defaults to 0.9.
+            epsilon (float, optional): 초기 탐험율. Defaults to 1.0.
+            epsilon_min (float, optional): 최소 탐험율. Defaults to 0.05.
+            decay_rate (float, optional): 스텝별 Epsilon 감쇄 상수. Defaults to 0.995.
+        """
         self.alpha = alpha       # 학습률 (Learning Rate)
         self.gamma = gamma       # 미래 보상 할인율 (Discount Factor)
         self.epsilon = epsilon   # 탐험율 (Exploration Rate)
+        self.epsilon_min = epsilon_min  # 최소 탐험율
+        self.decay_rate = decay_rate    # 감쇄율
         self.q_table_path = q_table_path
         
         # Q-테이블 초기화: {(state_str): {action: q_value}}
@@ -40,20 +65,37 @@ class QLearningAgent:
                 "spot_b": {"cost_per_hour": 0.2, "gpu_scale_factor": 0.3}
             }
 
-        # 행동 정의 (Action Space)
-        # 0: ASSIGN_W1 (On-demand), 1: ASSIGN_W2 (Spot-A), 2: ASSIGN_W3 (Spot-B)
-        # 3: HOLD (대기열 지연 보류), 4: SCALE_OUT (Spot 추가 동적 증설)
-        self.actions = [0, 1, 2, 3, 4]
+        # 행동 정의 (Action Space) - Spot-B(Action 2) 제거에 따른 4개 액션 최적화
+        # 0: ASSIGN_OD (On-demand 배정), 1: ASSIGN_SPOT (Spot-A 배정)
+        # 2: HOLD (대기열 지연 보류), 3: SCALE_OUT (Spot 추가 동적 증설)
+        self.actions = [0, 1, 2, 3]
         
         # Q-테이블 자동 로드
         self.load_q_table()
 
     def _state_to_str(self, state):
-        """상태 튜플 (q_len, active_bitmap, budget_level)을 Q-Table key용 문자열로 변환합니다."""
+        """
+        상태 튜플 (q_len, active_bitmap, budget_level)을 Q-Table key용 문자열로 변환합니다.
+
+        Args:
+            state (tuple): (큐 크기, 활성 비트맵, 예산 수준) 형태의 튜플.
+
+        Returns:
+            str: "큐크기_비트맵_예산수준" 형식의 문자열 키.
+        """
         return f"{state[0]}_{state[1]}_{state[2]}"
 
     def get_q_value(self, state, action):
-        """특정 상태와 행동에 매핑된 Q-값을 반환합니다."""
+        """
+        특정 상태와 행동에 매핑된 Q-값을 반환합니다.
+
+        Args:
+            state (tuple): 조회 대상 상태 튜플.
+            action (int): 조회 대상 행동 정수 ID.
+
+        Returns:
+            float: Q-Table 상에 기록된 Q-Value (미등장 상태인 경우 0.0으로 신규 생성).
+        """
         state_str = self._state_to_str(state)
         if state_str not in self.q_table:
             # 상태가 처음 등록되는 경우 모든 행동의 Q-값을 0.0으로 초기화
@@ -61,7 +103,16 @@ class QLearningAgent:
         return self.q_table[state_str].get(action, 0.0)
 
     def choose_action(self, state, available_actions=None):
-        """Epsilon-Greedy 탐색 정책을 활용하여 행동을 선정합니다."""
+        """
+        Epsilon-Greedy 탐색 정책을 활용하여 행동을 선정합니다.
+
+        Args:
+            state (tuple): 현재 환경의 상태 튜플.
+            available_actions (list, optional): 현재 시점에 가용한 행동 공간 목록. Defaults to None.
+
+        Returns:
+            int: 결정된 행동 정수 ID.
+        """
         if available_actions is None:
             available_actions = self.actions
 
@@ -93,7 +144,14 @@ class QLearningAgent:
 
     def update_q_value(self, state, action, reward, next_state, next_available_actions=None):
         """
-        Q-Learning 학습 핵심 갱신 알고리즘 (Bellman Equation 적용).
+        Q-Learning 학습 핵심 갱신 알고리즘 (Bellman Equation 적용) 및 Epsilon 감쇄를 연동합니다.
+
+        Args:
+            state (tuple): 이전 상태 튜플.
+            action (int): 이전 행동 ID.
+            reward (float): 획득한 보상값.
+            next_state (tuple): 전이된 다음 상태 튜플.
+            next_available_actions (list, optional): 다음 상태에서 가용한 행동 리스트. Defaults to None.
         """
         if next_available_actions is None:
             next_available_actions = self.actions
@@ -118,12 +176,23 @@ class QLearningAgent:
         state_str = self._state_to_str(state)
         self.q_table[state_str][action] = new_q
 
+        # Epsilon 감쇄 적용
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.decay_rate)
+
     def calculate_reward(self, success, execution_time, worker_type, delay_time, deadline_exceeded):
         """
         보상 함수(Reward Function) 수식 모델 구현.
-        - SLA 보너스: +10.0 (성공 완료 시)
-        - 시간당 요금 차감 (실행 시간에 비례)
-        - 마감 시한 초과(지연) 시 초당 -5.0의 엄격한 패널티 적용
+
+        Args:
+            success (bool): 태스크 실행 성공 완료 여부.
+            execution_time (float): 실제 연산 수행 소요 시간.
+            worker_type (str): 연산에 사용된 워커 타입 ("on_demand" / "spot_a").
+            delay_time (float): SLA 마감 기한 초과 지연 시간.
+            deadline_exceeded (bool): SLA 데드라인 초과 여부.
+
+        Returns:
+            float: 산출된 보상(Reward) 스칼라 값.
         """
         reward = 0.0
         
@@ -160,7 +229,12 @@ class QLearningAgent:
             try:
                 with open(self.q_table_path, 'r', encoding='utf-8') as f:
                     self.q_table = json.load(f)
-                print(f"[Q-Learning Agent] Q-Table 로드 성공. (보존된 상태수: {len(self.q_table)})")
+                
+                # Q-Table이 성공적으로 로드된 경우 기학습된 지식을 활용하기 위해 탐험율을 최소치로 즉시 전환
+                if self.q_table:
+                    self.epsilon = self.epsilon_min
+                    
+                print(f"[Q-Learning Agent] Q-Table 로드 성공. (보존된 상태수: {len(self.q_table)}) | 탐험율(Epsilon)을 {self.epsilon}으로 설정합니다.")
             except Exception as e:
                 print(f"[Q-Learning Agent] Q-Table 로드 실패: {e}")
         else:

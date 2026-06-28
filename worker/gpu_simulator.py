@@ -16,27 +16,31 @@ except ImportError:
 
 # --- 0. 부하 제어 하이퍼파라미터 ---
 
-# CNN 학습 루프 설정
-CNN_BATCH_SIZE = 128          # 미니배치 크기 (한 번에 처리할 이미지 128장)
-CNN_NUM_BATCHES = 100         # 에포크당 미니배치 반복 횟수 (1에포크에 128 * 100 = 12,800장 처리)
-CNN_IMAGE_SIZE = 28           # 입력 이미지 크기 (28x28 해상도, MNIST 데이터셋 규격)
-CNN_NUM_CLASSES = 10          # 분류할 최종 정답의 개수 (예: 0~9 숫자 분류)
+# CNN 학습 루프 설정 (연산량 집중)
+CNN_BATCH_SIZE = 64          # 미니배치 크기 (메모리 오버헤드 감소를 위해 128에서 64로 축소)
+CNN_NUM_BATCHES = 100         # 에포크당 반복 횟수 (CPU 연산량 대폭 상승 제어를 위해 250에서 100으로 조정)
+CNN_IMAGE_SIZE = 28           # 입력 이미지 크기
+CNN_NUM_CLASSES = 10          # 분류 클래스 수
 
 # RNN/LSTM 학습 루프 설정
-SEQ_BATCH_SIZE = 128          # 시계열 데이터의 미니배치 크기
-SEQ_NUM_BATCHES = 100         # 에포크당 반복 횟수
-SEQ_LENGTH = 30               # 시퀀스 길이 (한 번에 입력되는 시간 흐름의 길이, 기존 15에서 30으로 증가)
-SEQ_FEATURE_SIZE = 32         # 입력 피처 차원 (각 시점마다 입력되는 데이터의 특성 개수)
-SEQ_HIDDEN_SIZE = 64          # 은닉 상태(Hidden State) 차원 크기 (메모리 역할)
+SEQ_BATCH_SIZE = 64          # 시계열 데이터의 미니배치 크기 (128에서 64로 축소)
+SEQ_NUM_BATCHES = 50         # 에포크당 반복 횟수 (100에서 50으로 축소)
+SEQ_LENGTH = 30               # 시퀀스 길이
+SEQ_FEATURE_SIZE = 32         # 입력 피처 차원
+RNN_HIDDEN_SIZE = 64          # RNN 은닉 차원 (경량형)
+LSTM_HIDDEN_SIZE = 128        # LSTM 은닉 차원 (메모리 사용 유도, 256에서 128로 축소)
 SEQ_NUM_CLASSES = 10          # 분류 클래스 수
 
-# LSTM Embedding 설정
-LSTM_VOCAB_SIZE = 1000        # 어휘 사전 크기
-LSTM_EMBED_DIM = 32           # 임베딩 벡터 차원
+# LSTM Embedding 설정 (메모리 사용량 상승 유도)
+LSTM_VOCAB_SIZE = 2000        # 어휘 사전 크기 확장
+LSTM_EMBED_DIM = 128          # 임베딩 벡터 차원 대폭 확장 (메모리 할당 증가, 256에서 128로 축소)
 
 # Fallback 더미 연산 설정
-FALLBACK_DUMMY_LOOP = 500000  # CPU 부하 모사 루프 횟수 (기존 200000 → 500000)
 FALLBACK_SLEEP = 0.05         # Fallback 시 최소 대기 시간(초)
+
+# 가상 메모리 홀더 (더미 메모리 점유 시뮬레이션용)
+dummy_memory_holder = []
+
 
 
 # --- 1. PyTorch 모델 정의 (CNN, RNN, LSTM) ---
@@ -102,12 +106,12 @@ if HAS_TORCH:
             super().__init__()
             self.rnn = nn.RNN(
                 input_size=SEQ_FEATURE_SIZE,
-                hidden_size=SEQ_HIDDEN_SIZE,
+                hidden_size=RNN_HIDDEN_SIZE,
                 num_layers=2,          # 2층 스택 RNN
                 batch_first=True,
                 dropout=0.3            # 다층 RNN 간 드롭아웃
             )
-            self.fc = nn.Linear(SEQ_HIDDEN_SIZE, SEQ_NUM_CLASSES)
+            self.fc = nn.Linear(RNN_HIDDEN_SIZE, SEQ_NUM_CLASSES)
 
         def forward(self, x):
             out, _ = self.rnn(x)
@@ -128,12 +132,12 @@ if HAS_TORCH:
             self.embedding = nn.Embedding(LSTM_VOCAB_SIZE, LSTM_EMBED_DIM)
             self.lstm = nn.LSTM(
                 input_size=LSTM_EMBED_DIM,
-                hidden_size=SEQ_HIDDEN_SIZE,
+                hidden_size=LSTM_HIDDEN_SIZE,
                 num_layers=2,          # 2층 스택 LSTM
                 batch_first=True,
                 dropout=0.3            # 다층 LSTM 간 드롭아웃
             )
-            self.fc = nn.Linear(SEQ_HIDDEN_SIZE, SEQ_NUM_CLASSES)
+            self.fc = nn.Linear(LSTM_HIDDEN_SIZE, SEQ_NUM_CLASSES)
 
         def forward(self, x):
             # x: (batch, seq_len) 정수 인덱스 → Embedding → (batch, seq_len, embed_dim)
@@ -152,7 +156,16 @@ optimizer.step()                 # 5. 가중치 업데이트
 """
 
 def run_pytorch_epoch(model_type, device):
-    """각 모델 타입에 맞춰 1에포크 분량의 부하 연산을 구동하고 오차를 계산합니다."""
+    """
+    각 모델 타입에 맞춰 1에포크 분량의 PyTorch 학습 연산을 구동하고 최종 배치 Loss를 계산합니다.
+
+    Args:
+        model_type (str): 신경망 모델 유형 ("CNN" / "RNN" / "LSTM").
+        device (str): 연산을 구동할 디바이스 ("cuda" / "cpu").
+
+    Returns:
+        float: 해당 에포크의 마지막 배치 손실(Loss) 값.
+    """
     if not HAS_TORCH:
         return 0.0
 
@@ -213,18 +226,87 @@ def run_pytorch_epoch(model_type, device):
             loss_val = loss.item()
         return loss_val
 
+
+def run_dummy_epoch(model_type):
+    """
+    PyTorch가 없는 환경 또는 에러 발생 시, 
+    모델 종류별로 차별화된 CPU 및 메모리 부하를 모사합니다.
+
+    Args:
+        model_type (str): 신경망 모델 유형 ("CNN" / "RNN" / "LSTM").
+
+    Returns:
+        float: 모사 손실 값 (0.0 ~ 1.0 사이의 float).
+    """
+    global dummy_memory_holder
+    model_upper = model_type.upper()
+    
+    if model_upper == "CNN":
+        # CNN: 연산 집중형 (높은 CPU 점유율 유도)
+        cpu_loop_count = 1500000 
+        dummy_sum = 0.0
+        for i in range(cpu_loop_count):
+            dummy_sum += (i * 0.0001) ** 0.5
+        
+        dummy_memory_holder = [] # 메모리는 거의 사용하지 않음
+        time.sleep(0.02)
+        return dummy_sum % 1.0
+
+    elif model_upper == "LSTM":
+        # LSTM: 메모리 점유형 (높은 메모리 사용률 유도)
+        # 1GB 컨테이너 기준 약 12% (120MB) 임시 점유로 축소 조정 (OOM 방지)
+        # float(8 bytes) * 15,000,000 = 약 120MB
+        mem_element_count = 15000000 
+        dummy_memory_holder = [0.123] * mem_element_count 
+        
+        cpu_loop_count = 50000
+        dummy_sum = 0.0
+        for i in range(cpu_loop_count):
+            dummy_sum += i
+            
+        time.sleep(0.08)
+        return dummy_sum % 1.0
+
     else:
-        # 알 수 없는 모델 타입의 경우 0.1초 지연 처리
-        time.sleep(0.1)
-        return 0.0
+        # RNN 및 기본: 균형 잡힌 가벼운 부하
+        cpu_loop_count = 400000
+        dummy_sum = 0.0
+        for i in range(cpu_loop_count):
+            dummy_sum += i
+        
+        # 가벼운 메모리 점유 (약 16MB로 축소)
+        dummy_memory_holder = [0.456] * 2000000
+        time.sleep(0.05)
+        return dummy_sum % 1.0
 
 
 # --- 2. 이종 GPU 시뮬레이터 실행기 (PyTorch Task Runner) ---
 
 class PyTorchTaskRunner:
-    """실제 PyTorch 연산을 돌리면서 워커 성능 등급에 맞춰 연산 완료 시간을 제어하는 실행기"""
+    """
+    실제 PyTorch 연산을 돌리면서 워커 성능 등급에 맞춰 연산 완료 시간을 제어하는 실행기 클래스입니다.
+
+    Attributes:
+        task_id (str): 실행할 태스크 고유 ID.
+        model_type (str): 신경망 모델 유형 ("CNN" / "RNN" / "LSTM").
+        epochs (int): 학습 Epoch 횟수.
+        worker_type (str): 워커 유형 ("on_demand" / "spot_a").
+        speed_factor (float): 성능 등급별 속도 계수.
+        progress (float): 작업 진행률 (0.0 ~ 100.0 %).
+        status (str): 작업 실행 상태 ("RUNNING" / "SUCCESS" / "FAILED").
+        logs (list): 연산 진행 로그 목록.
+        execution_time (float): 총 소요 수행 시간.
+    """
     def __init__(self, task_id, model_type, epochs, worker_type):
-        
+        """
+        PyTorchTaskRunner 인스턴스를 초기화합니다.
+
+        Args:
+            task_id (str): 태스크 고유 ID.
+            model_type (str): 신경망 모델 유형.
+            epochs (int): 학습 Epoch 횟수.
+            worker_type (str): 워커 유형.
+        """
 # 작업 아이디, 모델 종류, 반복 에포크 수, 워커 노드의 종류를 인자로 받아 초기화
         self.task_id = task_id
         self.model_type = model_type
@@ -245,13 +327,17 @@ class PyTorchTaskRunner:
         self.execution_time = 0.0
 
     def run(self):
+        """
+        지정된 AI 모델 학습 연산(또는 모사 연산)을 수행합니다.
+        가상 OOM 장애 유발 시나리오 및 성능 차별화 지연(Sleep)을 시뮬레이션합니다.
+        """
         print(f"\n[Worker Task] 작업 시작: {self.task_id} (모델: {self.model_type}, 노드타입: {self.worker_type}, 속도배수: {self.speed_factor})")
         start_time = time.time() # 전체 작업 시작 시간
         
         # 가상 OOM 장애 유발 로직
         is_oom_trigger = False
-        # OOM -> 1.0 실험
-        if self.model_type.upper() == "LSTM" and random.random() < 1.0:
+        # LSTM OOM 확률을 8% 수준으로 현실화 (기존 100% 강제 발생에서 조정)
+        if self.model_type.upper() == "LSTM" and random.random() < 0.08:
             is_oom_trigger = True
 
         elif "fail" in self.task_id.lower():
@@ -282,16 +368,10 @@ class PyTorchTaskRunner:
                     loss = run_pytorch_epoch(self.model_type, device)
                 except Exception as e:
                     print(f"[Worker Task] 연산 중 경고 발생 (Fallback 대체): {e}")
-                    loss = 1.0 / (epoch + 1)
-                    time.sleep(FALLBACK_SLEEP)
+                    loss = run_dummy_epoch(self.model_type)
             else:
-                # PyTorch 라이브러리가 없을 때의 모사 연산 -> CPU 부하
-                loss = 1.0 / (epoch + 1)
-                # CPU 연산 시간 모사를 위한 더미 루프
-                dummy_sum = 0
-                for x in range(FALLBACK_DUMMY_LOOP):
-                    dummy_sum += x
-                time.sleep(FALLBACK_SLEEP)
+                # PyTorch 라이브러리가 없을 때의 모사 연산 -> 모델별 차별화 부하
+                loss = run_dummy_epoch(self.model_type)
                 
             # 2. GPU 비동기 연산 완료 동기화
             if HAS_TORCH and device == "cuda":
@@ -300,8 +380,6 @@ class PyTorchTaskRunner:
             actual_time = time.time() - epoch_start # 1epoch당 시간
             
             # 3. 속도 지연(시뮬레이션) 계산
-            # 목표 소요 시간 = 실제 소요 시간 / 속도 계수
-            # 예: 0.5초가 걸렸고 spot_b(0.3 성능)라면, 목표 시간은 0.5 / 0.3 = 약 1.66초
             target_time = actual_time / self.speed_factor
             delay = target_time - actual_time
             
@@ -321,4 +399,9 @@ class PyTorchTaskRunner:
         # 모든 epoch가 끝나면    
         self.execution_time = time.time() - start_time
         self.status = "SUCCESS"
+        
+        # 메모리 시뮬레이션 공간 해제
+        global dummy_memory_holder
+        dummy_memory_holder = []
+        
         print(f"[Worker Task] 작업 완료: {self.task_id} (총 소요 시간: {self.execution_time:.2f}초)\n")

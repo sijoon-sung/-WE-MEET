@@ -6,18 +6,18 @@ nodes:
   on_demand:
     cpu_limit: 2.0
     memory_limit_mb: 2048
-    cost_per_hour: 1.0
+    cost_per_hour: 360.0  # 초당 $0.10달러 요율로 인상하여 예산 변화를 직관적이고 다이내믹하게 조정
     gpu_scale_factor: 1.0
     preemption_probability: 0.0
   spot_a:
     cpu_limit: 1.0
     memory_limit_mb: 1024
-    cost_per_hour: 0.4
+    cost_per_hour: 72.0   # 초당 $0.02달러 요율 (80% 저렴한 Spot 가격 특성 모사)
     gpu_scale_factor: 0.6
     preemption_probability: 0.3
   spot_b:
     cpu_limit: 0.5
     memory_limit_mb: 512
-    cost_per_hour: 0.2
+    cost_per_hour: 36.0   # 초당 $0.01달러 요율 (현재는 사용하지 않으나 하향 호환성 유지)
     gpu_scale_factor: 0.3
     preemption_probability: 0.7

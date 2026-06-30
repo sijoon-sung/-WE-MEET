@@ -1,95 +1,32 @@
-# [통합 패키지] WE-Meet 수행 계획서 & 기술 제안서
+# Baby Ray 프로젝트 수행계획서 및 기술제안서 (통합 개편본)
 
-> **본 계획서는 Docker 기반 경량 분산 런타임(Baby Ray) 구축 및 자원 인지형 동적 스케줄러 개발 프로젝트의 학사 행정용 팀 수행계획서와 이를 실현하기 위한 정량적/수치적 기술 제안서를 통합한 문서입니다.**
-
----
-
-# [참고 1-1] 하기 계절학기 캡스톤디자인/WE-Meet 수행 계획서 (팀)
-
-## 1. 프로젝트 과제 명칭
-**Docker 기반 경량 분산 런타임(Baby Ray) 구축 및 자원 인지형 동적 스케줄러 개발**
-
-* **설계 참고 자료:** 본 프로젝트는 분산 처리 프레임워크 Ray의 핵심 구조(GCS, locality-aware 스케줄링, lineage 기반 장애복구)와, 이를 Go로 재구현한 Stanford CS244B 프로젝트 「Baby Ray: Re-implementing a distributed Python runtime in Go」(2024)를 설계 참고 자료로 활용함.
+본 문서는 이기종 가상 클러스터 기반 ML 분산 학습 제어 엔진인 **WE-MEET**의 프로젝트 수행 계획과 기술 설계 명세서입니다. 기존 수행 계획 및 구현 리스트와 일정을 보존한 상태에서, OS 스케줄링 기법 및 4차원 상태 공간 Q-Learning 설계를 보완하여 재정립하였습니다.
 
 ---
 
-## 2. 팀원 구성 및 업무분장 내역
+# [Part 1] 프로젝트 수행계획서
 
-| No. | 학번 | 성명 | 담당 업무 |
-| :--- | :--- | :--- | :--- |
-| **1** | 202402070 | 성시준 | **[팀장 / 분산 시스템 코어 개발]**<br>• Docker 기반 가상 분산 노드 구축 및 cGroup(CPU/Memory) 자원 제한 세팅<br>• gRPC/Protobuf 기반 노드 간 고속 양방향 통신 인터페이스 설계 및 구현<br>• 이기종 자원 상태를 감지하여 연산을 분배하는 자원 인지형 동적 스케줄러 엔진 개발<br>• 가상 노드 정지 상황에 대응하는 고가용성(HA) 작업 복구 알고리즘 구현 |
-| **2** | 202402056 | 김현진 | **[팀원 / 가상 인프라 자동화 및 모니터링 분석]**<br>• 코드 기반 인프라(IaC) 제어 개념을 응용한 Docker 가상 분산 클러스터 배포 자동화 및 관리 스크립트 작성<br>• 가상 노드별 실시간 자원 사용량(CPU/Memory) 메트릭 수집 및 모니터링 모듈 구축<br>• 분산 환경 장애 상황 감지 시나리오 및 AI 연산 벤치마크 테스트 수행 보조<br>• 스케줄러 및 복구 조건별 성능 데이터 분석 및 최종 결과 보고서 기술 문서화 작성 |
+## 1. 과제 개요 및 주요 목표
+*   단일 Windows 호스트 PC 환경(WSL2 기반 Docker) 하에서 gRPC, 리눅스 cGroup 자원 격리, 그리고 강화학습(Q-Learning) 및 OS 스케줄링 이론을 융합하여 이기종 분산 인프라 상의 머신러닝 학습 연산을 실시간으로 제어하고 탄력적으로 스케일링하는 분산 학습 제어 엔진을 구현합니다.
+*   학습 모델(CNN, RNN, LSTM)의 고유한 자원 요구도 특성에 대응하여 물리적인 자원 격리를 시연하고 최적의 가변 요금제(Spot 요금제) 스케줄링 정책을 학습해 냄으로써 실제 분산 컴퓨팅 런타임의 최적 자원 배분 메커니즘을 증명하는 것을 최종 목표로 합니다.
 
----
+## 2. 주요 추진 목표 및 핵심 구현 리스트
+*   **이기종 가상 성능 시뮬레이션**: 단일 호스트(RTX 4060 Laptop) 내에서 `torch.cuda.synchronize()` 후 `gpu_scale_factor`에 비례한 인위적 지연(`sleep`)을 삽입하여 성능 편차 구현.
+    *   **Worker-1**: On-Demand (Scale 1.0, CPU 2.0 Cores, Mem 2GB)
+    *   **Worker-2**: Spot-A (Scale 0.6, CPU 1.0 Core, Mem 1GB, 최대 30대 동적 확장 및 번호 재사용)
+*   **3대 머신러닝 워크로드 구성**:
+    *   **이미지 분류 (CNN)**: SimpleCNN (GPU 연산 집약형, Spot 절감 검증용)
+    *   **시계열 예측 (RNN)**: SimpleRNN (CPU/GPU 균형 연산형, 노드 이종성 검증용)
+    *   **자연어 처리 (LSTM)**: SimpleLSTM (메모리 집약형, cGroup 제한 측정용)
+*   **Task Lineage DAG 기반 장애 자가 복구**:
+    *   Heartbeat 3초 미수신 시 DEAD 판정 ➔ GCS의 Task Lineage DAG 분석 ➔ 의존 하위 태스크 식별 ➔ 최신 체크포인트부터 학습 재개 및 Auto Scale-out 연동.
+*   **고가용성 및 클러스터 안전 가드 장치 (Fault-Tolerance & Guard Systems)**:
+    *   **비동기 좀비 컨테이너 클리너 (Async GCS Cleaner)**: Head Node 초기 구동 시, 호스트에 잔존하던 과거의 비정상 종료 Spot 컨테이너 잔해를 검출하여 **비동기 데몬 스레드로 백그라운드 소거**. gRPC 소켓 바인딩 및 서비스 시작을 차단하던 구버전 삭제 딜레이(3초 블로킹 병목)를 해결.
+    *   **호스트 물리 메모리 Guard (Host Memory Guard)**: 스케일아웃 기동 시 실시간 호스트 메모리를 측정하여 가용 여유 용량이 **2.0 GB 미만**일 때 추가 컨테이너 배포를 거부하고 보류하여 호스트 OS의 OOM 붕괴 방지.
+    *   **가용 GPU VRAM Guard (VRAM Guard)**: `nvidia-smi` API 및 시뮬레이션을 통해 가용 GPU 메모리가 **500 MiB 미만**일 때 스케일아웃을 긴급 차단하여 VRAM 고갈에 따른 CUDA 연산 크래시 차단.
+    *   **작업 분배 롤백 방어 (Task Rollback Guard)**: 다중 배정(Multi-Dispatch) 과정에서 경합 조건 등으로 인해 특정 워커로의 태스크 바인딩 및 연산 위임에 실패할 경우, 작업을 삭제하지 않고 GCS 대기열의 맨 앞(`insert(0, task)`)으로 즉각 안전하게 회수 및 롤백.
 
-## 3. 프로젝트 추진 배경 및 필요성
-
-### 가. 기술적 배경
-현대 AI 분산 시스템은 단일 장비의 한계를 초월한 대규모 연산 처리를 위해 핵심 기술 스택을 필수적으로 채택하고 있습니다. 본 프로젝트는 이러한 기술들을 클라우드 서비스의 상위 API 수준에서 소비하는 것에 그치지 않고, 소스 코드 레벨에서 직접 설계하고 동작을 실증하는 것을 목표로 합니다.
-1. **분산 컴퓨팅 런타임 + Auto Scaling 기반 동적 클러스터**: Ray의 핵심 설계를 참고하여 Docker Compose 기반의 경량 분산 런타임을 직접 구현합니다. 특히 태스크 대기열 부하량에 따라 Worker 컨테이너를 자동으로 추가·제거하는 Auto Scaling 메커니즘을 설계하여 실제 클라우드 환경을 재현합니다.
-2. **고속 노드 간 통신 (gRPC/Protobuf)**: Head 노드와 Worker 노드 간의 제어 명령 및 상태 데이터 교환을 위해, 텍스트 기반 JSON/REST 방식의 병목을 극복하는 이진 직렬화(Protobuf)와 멀티플렉싱 스트리밍을 지원하는 gRPC 통신 인터페이스를 구현합니다.
-3. **실시간 생존 감지 (Heartbeat)와 고가용성 (HA)**: OOM이나 프로세스 비정상 종료 등 분산 환경에서 발생하는 장애를 감지하기 위한 Heartbeat 메트릭 파이프라인과 고가용성 자가 복구 메커니즘을 구현하여 시스템 마비를 방지합니다.
-4. **컨테이너 자원 격리 (cgroup)**: 리눅스 커널의 cgroup 기술을 활용하여 컨테이너별 CPU 코어와 메모리를 강제 제한한 비대칭 클러스터 환경을 구성하고, 이기종 노드 간 자원 간섭을 차단합니다.
-5. **Q-learning 기반 비용 인지형 스케줄러**: 설정 파일(`cost_model.yaml`)에 노드 유형(On-Demand/Spot)별 가상 요금 모델과 성능 프로파일을 정의하고, 이를 학습 데이터로 삼는 Q-learning 에이전트를 구현하여 태스크 마감 시한(Deadline) 내 총 가상 비용을 최소화하는 정책을 탐색합니다.
-
-### 나. 요구사항 분석
-* **[과제 1] Auto Scaling 기반 동적 노드 관리**: Docker Compose는 초기 배포 및 정적 인프라에만 사용하고, 동적 Scale-out/in은 **Docker SDK를 마스터 Head에 탑재**하여 직접 컨테이너 ID를 타겟팅해 가동 및 소멸을 독립 수행하도록 설계.
-* **[과제 2] Q-learning 비용 인지형 스케줄러**: State(대기 태스크, active 자원 비트맵, 예산), Action(On-demand 할당, Spot-A 할당, HOLD, SCALE_OUT), Reward(Deadline 준수 보너스, 비용 및 지연 패널티) 체계 설계 및 비용 최적화 탐색.
-* **[과제 3] 노드 장애 시 중간 연산 유실 방지**: Worker 강제 종료 시 GCS에 기록된 Task Lineage를 역추적하여 유실된 태스크만 선택적으로 재할당 및 체크포인트 기반 복구.
-* **[과제 4] 인프라 일관성 재현 (IaC 기반 자동화)**: Docker Compose와 자원 제한 설정을 스크립트화하여 비대칭 클러스터 환경을 원클릭으로 재현하고 Scale-out 노드에도 동일 템플릿 자동 적용.
-
-### 다. 수행 필요성
-* 퍼블릭 클라우드의 상위 API 사용에 머무르지 않고, 가상 분산 환경의 핵심 컴포넌트(IaC, cGroup, gRPC, Task Lineage, Auto Scaling, Q-learning)를 바닥부터 직접 구현하여 DevOps 및 클라우드 시스템 엔지니어링 역량을 극대화함.
-
----
-
-## 4. 최종 목표 및 주요 결과물
-
-### 가. 최종 목표
-* Docker 가상 분산 환경에서 cGroup 기반 자원 격리, Auto Scaling 기반 동적 노드 관리, Q-learning 비용 인지형 스케줄러, Task Lineage 기반 고가용성(HA) 자가 복구 모듈을 통합 구축하여 성능·비용·안정성을 실증함.
-
-### 나. 주요 결과물의 우선순위
-* **Tier 1 (필수 결과물)**
-  * gRPC 통신 프로토콜 + Heartbeat 파이프라인 구현
-  * cGroup 자원 격리 + PyTorch 학습 태스크 연동
-  * Auto Scaling: 대기열 기반 Worker 자동 증설·회수
-  * Q-learning CASF 스케줄러 (가상 비용 모델 포함)
-  * Task Lineage 기반 자동 장애 복구 (기본형)
-* **Tier 2 (심화 결과물)**
-  * Lineage DAG 역추적 심화 (의존 태스크 연쇄 복구)
-  * Scale-out ↔ 장애복구 완전 자동 연동 (통합 제어 루프)
-  * *※ 일정상 어려울 경우 Tier 1 결과만으로 결과보고서 작성*
-
-### 다. 세부 설계 내용
-* **gRPC 통신 프로토콜 및 API 명세**
-  * `SendHeartbeat`: Worker → Head (CPU, Memory, 노드 유형 송신)
-  * `AssignTask`: Head → Worker (Task ID, 모델, 데이터셋 경로 등 전달)
-  * `GetTaskStatus`: Head → Worker (실행 상태, 진행률, 로그 확인)
-  * `ResizeResources`: Head → Worker (Scale-in 시 cGroup 자원 제한 조정)
-  * `RegisterWorker` / `DeregisterWorker`: Worker 등록 및 제거 프로토콜
-* **Auto Scaling 기반 동적 클러스터 설계**
-  * **Scale-out**: 대기열 부하 적재 시, Spot-A 워커를 최대 30대까지 동적으로 증설
-  * **Scale-in**: 대기열 0개 및 전체 평균 CPU < 20%가 10초 지속 시 유휴 워커를 순차적으로 안전하게 stop & remove 하여 완전 회수
-  * **cGroup 템플릿**: Scale-out 시 Spot-A 프로파일(CPU 1.0 Core / Memory 1GB) 자동 적용 및 순차 네이밍(`worker-2-1` ~ `worker-2-30`) 부여. 컨테이너 반환 시 비어 있는 가장 작은 인덱스 번호를 재선점하여 재사용하는 **Index Recycling(인덱스 리사이클링)** 논리 구현.
-* **이기종 가상 성능 시뮬레이터 구성**
-  * 단일 호스트(RTX 4060 Laptop) 내에서 `torch.cuda.synchronize()` 후 `gpu_scale_factor`에 비례한 인위적 지연(`sleep`)을 삽입하여 성능 편차 구현.
-  * **Worker-1**: On-Demand (Scale 1.0, CPU 2.0 Cores, Mem 2GB)
-  * **Worker-2**: Spot-A (Scale 0.6, CPU 1.0 Core, Mem 1GB, 최대 30대 동적 확장 및 번호 재사용)
-* **3대 머신러닝 워크로드 구성**
-  * **이미지 분류 (CNN)**: SimpleCNN (GPU 연산 집약형, Spot 절감 검증용)
-  * **시계열 예측 (RNN)**: SimpleRNN (CPU/GPU 균형 연산형, 노드 이종성 검증용)
-  * **자연어 처리 (LSTM)**: SimpleLSTM (메모리 집약형, cGroup 제한 측정용)
-* **Task Lineage DAG 기반 장애 자가 복구**
-  * Heartbeat 3초 미수신 시 DEAD 판정 $\rightarrow$ GCS의 Task Lineage DAG 분석 $\rightarrow$ 의존 하위 태스크 식별 $\rightarrow$ 최신 체크포인트부터 학습 재개 및 Auto Scale-out 연동.
-* **고가용성 및 클러스터 안전 가드 장치 (Fault-Tolerance & Guard Systems)**
-  * **비동기 좀비 컨테이너 클리너 (Async GCS Cleaner)**: Head Node 초기 구동 시, 호스트에 잔존하던 과거의 비정상 종료 Spot 컨테이너 잔해를 검출하여 **비동기 데몬 스레드로 백그라운드 소거**. gRPC 소켓 바인딩 및 서비스 시작을 차단하던 구버전 삭제 딜레이(3초 블로킹 병목)를 전면 해결.
-  * **호스트 물리 메모리 Guard (Host Memory Guard)**: 스케일아웃 기동 시 실시간 호스트 메모리를 측정하여 가용 여유 용량이 **2.0 GB 미만**일 때 추가 컨테이너 배포를 거부하고 보류하여 호스트 OS의 OOM 붕괴 방지.
-  * **가용 GPU VRAM Guard (VRAM Guard)**: `nvidia-smi` API 및 시뮬레이션을 통해 가용 GPU 메모리가 **500 MiB 미만**일 때 스케일아웃을 긴급 차단하여 VRAM 고갈에 따른 CUDA 연산 크래시 차단.
-  * **작업 분배 롤백 방어 (Task Rollback Guard)**: 다중 배정(Multi-Dispatch) 과정에서 경합 조건 등으로 인해 특정 워커로의 태스크 바인딩 및 연산 위임에 실패할 경우, 작업을 삭제하지 않고 GCS 대기열의 맨 앞(`insert(0, task)`)으로 즉각 안전하게 회수 및 롤백.
-
----
-
-## 5. 주차별 추진 일정 (상세 내용)
+## 3. 주차별 추진 일정 (상세 일정표)
 
 | 주차/일차 | 팀 목표 및 활동 | 성시준 (팀장) 역할 | 김현진 (팀원) 역할 | 투입시간 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -116,19 +53,18 @@
 | **20일차 (7.17)** | 프로젝트 최종 제출 및 마감 | 최종 보고서 검토 및 최종 검수 | 최종 과제물 및 산출물 업로드 완료 | 4 |
 
 ---
----
 
-# 기술 제안서 (Technical Proposal)
+# [Part 2] 기술제안서 (Technical Proposal)
 
 ## 1. 분산 아키텍처 및 제어 토폴로지
 
-본 프로젝트는 **1 Head Node - $N$ Worker Nodes** 구조의 분산 런타임을 구축합니다. 
+본 프로젝트는 **1 Head Node - $N$ Worker Nodes** 구조의 분산 런타임을 구축합니다.
 GCS(Global Control Store)는 분산 컴퓨팅의 모든 메타데이터(노드 상태, 작업 대기열, Task Lineage, 체크포인트 경로)를 유지하는 중앙 동기화 계층으로 동작하며, Head Node 내에 인메모리 스토어로 내장됩니다.
 
 ```mermaid
 graph TD
     subgraph Head Node
-        Scheduler["Q-Learning 스케줄러"] <--> GCS["GCS (Global Control Store)"]
+        Scheduler["Q-Learning 스케줄러 (4D + OS 이론)"] <--> GCS["GCS (Global Control Store)"]
         ScaleManager["Dynamic Worker Manager"] -->|Docker SDK| Containers["Worker Containers (cgroup 격리)"]
     end
     
@@ -145,11 +81,11 @@ graph TD
 ## 2. gRPC 기반 고성능 통신 인터페이스 및 프로토콜 규격
 
 ### 가. 프로토콜 타임아웃 및 메트릭 전송 수치 정의
-1. **Heartbeat 전송 주기**: 모든 활성 Worker는 **1.0초(1,000ms)** 간격으로 Head Node에 자신의 CPU/Memory 자원 사용률 및 노드 유형을 포함한 상태 패킷을 송신합니다.
-2. **생존 유실 판정 임계치 (Heartbeat Timeout)**: Head Node가 특정 Worker로부터 **3.0초(3,000ms)** 동안 Heartbeat를 수신하지 못하면, 해당 노드를 `DEAD` 상태로 간주하고 장애 복구 프로토콜을 수행합니다.
-3. **태스크 할당 및 수거 지연**: gRPC API 호출의 타임아웃은 **2.0초**로 제한하며, 실패 시 스케줄러 대기열로 작업을 롤백합니다.
+1.  **Heartbeat 전송 주기**: 모든 활성 Worker는 **1.0초(1,000ms)** 간격으로 Head Node에 자신의 CPU/Memory 자원 사용률 및 노드 유형을 포함한 상태 패킷을 송신합니다.
+2.  **생존 유실 판정 임계치 (Heartbeat Timeout)**: Head Node가 특정 Worker로부터 **3.0초(3,000ms)** 동안 Heartbeat를 수신하지 못하면, 해당 노드를 `DEAD` 상태로 간주하고 장애 복구 프로토콜을 수행합니다.
+3.  **태스크 할당 및 수거 지연**: gRPC API 호출의 타임아웃은 **2.0초**로 제한하며, 실패 시 스케줄러 대기열로 작업을 롤백합니다.
 
-### 나. Protobuf 규격 정의 (`babyray.proto`)
+### 나. Protobuf 인터페이스 규격 (`babyray.proto`)
 ```protobuf
 syntax = "proto3";
 
@@ -208,117 +144,83 @@ message TaskStatusResponse {
 
 ---
 
-## 3. 리눅스 커널 cgroup 기반의 이기종 자원 격리 규격
+## 3. 리눅스 커널 cgroup 기반 이기종 자원 격리 및 WSL2 가용성 가드
 
-단일 Windows Host (RTX 4060 Laptop GPU, AMD/Intel 8 Cores/16 Threads CPU, 16GB RAM) 하의 WSL2 환경에서 이기종 클러스터를 실증하기 위해, Docker Compose/Docker API를 통한 물리 자원 격리(cgroup) 한계치를 구체적으로 설정합니다.
+이기종 클러스터의 물리 성능 편차와 격리 안정성을 실증하기 위해 Docker의 cGroup 제한을 세분화하여 정의합니다.
 
 ### 가. 노드별 물리 자원 격리 스펙 및 요금 모델 (`cost_model.yaml`)
+1.  **On-Demand (기본 코어 노드)**: `cpus: 2.0`, `mem_limit: 2048M`, 가상 요금 **$1.0/hour**. (가장 안정적이며 대용량 메모리 보장)
+2.  **Spot-A (연산형 가속 노드)**: `cpus: 1.0`, `mem_limit: 1024M`, 가상 요금 **$0.4/hour**. (GPU 가속 위주, 메모리 제약 있음)
+3.  **Spot-B (최소 경량 노드)**: `cpus: 0.5`, `mem_limit: 512M`, 가상 요금 **$0.2/hour**. (단순 에포크 연산용)
 
-| 노드 ID | 노드 유형 (Type) | CPU 격리 한계치 (cgroup) | 메모리 격리 한계치 (cgroup) | 가상 요금 ($ / hour) | 중단 위험도 (Preemption) | GPU Scale Factor |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Worker-1** | On-Demand | `cpus: 2.0` (2 Cores) | `mem_limit: 2048M` (2GB) | **$1.0** | 0% | 1.0 (지연 없음) |
-| **Worker-2-N** | Spot-A (1~30대) | `cpus: 1.0` (1 Core) | `mem_limit: 1024M` (1GB) | **$0.4** | 30% | 0.6 (1.67배 지연) |
-
----
-
-## 4. 탄력적 Auto Scaling 알고리즘
-
-Head Node의 `Dynamic Worker Manager`는 큐에 적재된 대기 태스크 개수와 평균 노드 자원 부하를 모니터링하여 실시간으로 Worker 컨테이너를 가동 및 소멸시킵니다.
-
-### 가. 스케일 아웃 (Scale-out) 규칙
-* **트리거 임계치**: 스케줄러 의사결정 시 자원이 부족하고 대기열 병목이 있을 때, Q-Learning 에이전트의 판단에 따라 즉시 스케일아웃 기동.
-* **배포 기동 방식**: 호스트 Docker SDK (`client.containers.run`)를 제어하여 Spot-A 이미지(`babyray-worker-image:latest`)를 `worker-2-N` (N은 1~30 순차 및 재사용 인덱스) 형태로 즉시 실행하며, gRPC 포트는 50060번부터 바인딩합니다.
-
-### 나. 스케일 인 (Scale-in) 규칙
-* **트리거 임계치**: 대기열(Task Queue) 개수가 **0개**이며, 클러스터에 배포된 전체 Worker의 평균 CPU 사용률이 **20% 미만**인 상태가 **10.0초** 이상 지속될 때.
-* **수거 방식**: GCS에서 IDLE 상태인 Spot 워커 컨테이너를 Docker SDK의 `container.stop(timeout=5)` 및 `remove()` 로 완전히 소거하여 호스트 자원을 무중단 반환합니다.
+### 나. WSL2 / Docker RAM 안전 모니터링 가드
+Windows 호스트 시스템에서 WSL2가 램을 임의 점유하여 전체 OOM을 유발하는 문제를 막기 위해, 클러스터 매니저는 스케일 아웃 지시 전 `wsl free -b` 명령어를 동적으로 파싱합니다.
+*   WSL2 내부 가용 RAM이 **2.0GB 미만**으로 감지될 경우, 추가적인 Spot 노드의 스케일 아웃을 선제적으로 거부하여 호스트의 안전을 가드합니다.
 
 ---
 
-## 5. Q-learning 기반 비용/SLA 인지형 동적 스케줄러 수식 모델
+## 4. 3대 스케줄러 메커니즘 특성 비교
 
-비용과 마감 시한(Deadline) 내 완수(SLA 보장)를 동시에 조율하는 지능형 스케줄러의 강화학습 모델링입니다.
+| 비교 항목 | Static 스케줄러 모드 | Dynamic 스케줄러 모드 | Q-Learning (4D + OS 이론) 스케줄러 모드 |
+| :--- | :--- | :--- | :--- |
+| **의사결정 방식** | 큐 대기 크기 기준 정적 임계치 룰 | 노드 평균 자원(CPU/MEM) 부하 임계치 룰 | 4차원 상태 인지 및 행동 정책 기계 학습 |
+| **스케일 아웃 조건** | 큐에 대기 중인 태스크 수 $\ge 5$ | 클러스터 평균 CPU 또는 MEM $\gt 70\%$ | 예산이 풍족하고 요금이 저렴할 때 동적 기동 |
+| **스케일 인 조건** | 큐가 비어있고 유휴 상태가 10.0초 유지 | 큐가 비어있고 평균 CPU/MEM $\lt 20\%$ 가 10초 유지 | 예산 고갈 위험 또는 요금 폭등 시 자동 회수 |
+| **자원 효율성** | 낮음 (큐 크기만 보고 확장하므로 자원 낭비) | 보통 (실시간 자원 부하를 추적하여 분산함) | **높음** (모형의 성격에 맞춰 하드웨어 친화적 격리 배정) |
+| **Starvation 해결** | 없음 (FIFO 순차 처리로 인한 지연) | 없음 | **있음 (OS Aging 기법 결합)**: 임계 지연 시 강제 배정 |
+| **선두 차단(HOL) 해결**| 없음 | 없음 | **있음 (OS Backfilling 결합)**: 후순위 태스크 우회 배정 |
+| **한계 및 단점** | 워크로드 폭증 시 유연한 대처 불가 | 일시적인 부하 요동에 따른 노드 플래핑(Flapping) | 학습 수렴 전까지 탐험(Exploration) 오버헤드 존재 |
 
-### 가. 수학적 모델 정의
-1. **상태 공간 (State Space, $S$)**
-   $$S = (Q_{len}, R_{active}, C_{budget})$$$Q_{len}$은 대기 큐 크기 (0~10 정수화), $R_{active}$는 활성 노드 풀 상태 (On-Demand 및 Spot-A 의 실행 여부를 매핑한 2비트 맵), $C_{budget}$은 잔여 가상 예산 레벨 (Low, Medium, High).
+---
 
-2. **행동 공간 (Action Space, $A$)**
-   $$A = \{ a_{od}, a_{spot}, a_{hold}, a_{scale\_out} \}$$
-   * $a_{od}$: On-Demand 워커에 현재 큐의 헤드 태스크 할당.
-   * $a_{spot}$: Spot-A 워커에 현재 큐의 헤드 태스크 할당.
-   * $a_{hold}$: 현재 비용이나 자원 포화 상태를 감안하여 배치를 대기하고 지연 (HOLD).
-   * $a_{scale\_out}$: 새로운 Spot-A Worker를 추가 기동하도록 트리거.
+## 5. 4차원 상태 공간(State Space) 및 OS 스케줄링 이론 접목
 
-3. **보상 함수 (Reward Function, $R$)**
-   $$Reward = R_{SLA} - (Cost_{run} + Penalty_{late})$$
-   * **SLA 완수 보너스 ($R_{SLA}$)**: 마감 시간(Deadline) 내 태스크를 완료하면 $+10.0$ 부여.
-   * **수행 비용 감점 ($Cost_{run}$)**: 태스크 수행에 투입된 노드의 시간당 요금 비율 감점.
-     $$Cost_{run} = \gamma_{cost} \times (Cost_{worker} \times Time_{execution})$$
-   * **지연 감점 ($Penalty_{late}$)**: 마감 시한을 초과한 시간에 대해 초당 $-5.0$의 지중 감점 적용.
+Q-Learning 에이전트의 상태 변별력을 극대화하여 실제 시스템상의 병목 현상을 방지하도록 수학 모델을 고도화합니다.
 
-4. **학습 하이퍼파라미터**
-   * 학습률 ($\alpha$): **0.1**
-   * 할인율 ($\gamma$): **0.9**
-   * 탐험율 ($\epsilon$): **0.15** (최적 행동 선택 85%, 무작위 탐색 15%)
+### 가. 4차원 상태 공간 공식 정의
+$$State = (T_{profile}, W_{active}, P_{spot}, B_{level})$$
+
+1.  **$T_{profile}$ (대기열 워크로드 프로파일)**: 큐에 대기 중인 태스크들의 자원 요구 특성 분류.
+    *   `0`: CNN(비전, 연산 및 GPU 가속 지향)이 대다수
+    *   `1`: LSTM/RNN(자연어, 메모리 대역폭 지향)이 대다수
+2.  **$W_{active}$ (클러스터 노드 활성 비트맵)**: 현재 기동되어 IDLE 상태로 대기하고 있는 노드 풀의 조합 정보.
+3.  **$P_{spot}$ (실시간 가상 요금제 변동 및 중단 위험도)**:
+    *   `0`: 요금 안정기 (스팟 기동에 유리)
+    *   `1`: 요금 폭등 및 변동성 심화 (스팟 기동 자제)
+4.  **$B_{level}$ (예산 잔여 레벨)**: 잔여 가상 예산 구간 (0: 고갈, 1: 경고, 2: 풍족).
+
+### 나. 운영체제(OS) 스케줄링 기법의 결합 및 극복
+
+#### 1) Backfilling (비순차 스케줄링) 을 통한 HOL Blocking 극복
+*   **문제**: 큐 선두의 LSTM 작업이 가용 On-Demand 자원이 없어 대기할 때, 후순위의 CNN 작업이 비어 있는 Spot-A 노드를 활용하지 못하고 대기열에서 노는 병목 발생.
+*   **해법**: 스케줄러 루프 내에 **Backfilling 알고리즘**을 결합합니다. 최선두 태스크 배정이 보류될 경우, 큐 내부를 후방 탐색하여 현재 비어 있는 Spot-A 노드 스펙에 딱 맞는 CNN 작업을 선제 배정하여 클러스터 가동률을 극대화합니다.
+
+#### 2) Aging (에이징) 패널티를 통한 Starvation 극복
+*   **문제**: 강화학습 에이전트가 예산 보존(Reward 상승)을 위해 무겁고 요금이 비싼 RNN/LSTM 작업을 무한정 보류(Action 2: HOLD)시키는 기아 현상 발생.
+*   **해법**: 보상 함수 $Reward$ 계산 시 **Aging 패널티**를 산출하여 주입합니다.
+    $$Reward = R_{SLA} - (Cost_{run} + Penalty_{late} + Penalty_{wait})$$
+    *   태스크의 대기 시간($time.time() - task["enqueue_time"]$)이 임계점(30초)을 초과한 상태에서 에이전트가 `HOLD` 액션을 선택할 경우, 초당 $-10.0$의 강력한 누적 **$Penalty_{wait}$**를 부과하여 에이전트가 균형 잡힌 공정 배정을 학습하도록 강제합니다.
 
 ---
 
 ## 6. GCS & Task Lineage 기반 장애 자가 복구 (Fault Tolerance)
 
-스팟 노드가 중단될 때, 연산 결과를 처음부터 다시 계산하지 않고 유실된 중간 부분만 선택적으로 복구하는 메커니즘입니다.
+스팟 노드가 중단될 때 중간 연산 결과를 보존하고 복구하는 계보 관리 설계입니다.
 
-```mermaid
-graph LR
-    T1["Task 1: Data Preprocess (Completed)"] --> T2["Task 2: Epoch 1~20 Train (Completed)"]
-    T2 --> T3["Task 3: Epoch 21~40 Train (Failed - Node Dead)"]
-    T3 --> T4["Task 4: Evaluate Model (Blocked)"]
-
-    style T3 fill:#f9f,stroke:#333,stroke-width:2px
-    style T4 fill:#eee,stroke:#f00,stroke-dasharray: 5 5
-```
-
-1. **Task Lineage DAG 관리**: 모든 태스크는 고유 ID를 가지며, 자신의 부모 태스크 ID(의존성)를 GCS에 명시합니다. (예: `Task-4`는 `Task-3`의 결과 데이터를 입력으로 사용)
-2. **장애 감지 시 복구 절차**
-   * `worker-2-x` 사망 감지 $\rightarrow$ 해당 노드에서 실행 중이던 `Task-3` 상태를 `FAILED`로 변경.
-   * GCS의 Lineage를 추적하여 `Task-3`의 직전 완료 단계인 **`Task-2`의 체크포인트 파일(Epoch 20 시점의 가중치 `.pt`)** 존재 여부 확인.
-   * `Task-3`을 대기 큐로 재배정하고, 스케줄러는 다른 활성 노드에 작업을 할당하여 Epoch 21부터 학습을 이어서 진행하도록 유도.
-   * 최종적으로 `Task-4`는 유실 지점부터 재개되어 완성된 `Task-3`의 출력물을 정상 수신하여 실행을 완수.
+1.  **계보(Lineage) 관리**: 모든 태스크는 GCS에 부모/자식 관계의 DAG 링크 정보와 산출 가중치 정보(`.pt`) 캐시 유무를 등록합니다.
+2.  **연쇄 실패 방지**: 특정 노드 중단으로 `FAILED`가 감지되면, 스케줄러는 유실된 노드에서 수행 중이던 서브 DAG 트리의 직전 완료 단계 가중치 파일(`.pt`)을 찾아내어 대체 노드에서 학습을 이어서 재개(Re-execution)시킴으로써 가용성을 극대화합니다.
 
 ---
 
-## 7. 3대 ML 워크로드 및 이기종 가상 성능 시뮬레이션 지연 계산식
+## 7. 3대 ML 워크로드 성능 시뮬레이션 지연 계산식
 
-단일 로컬 GPU(RTX 4060 Laptop) 환경에서 이기종 노드에 따른 물리적인 성능 편차(Speedup 및 Slowdown)를 완벽하게 모사하기 위해, 학습 루프의 각 Epoch 끝에 PyTorch 동기화 명령어와 GPU 배율에 따른 지연을 강제 삽입합니다.
+이기종 물리 노드의 성능 속도 편차를 모사하기 위해 연산 루프 끝에 PyTorch 강제 동기화 지연을 구현합니다.
 
-### 가. 이기종 연산 지연 수식
 $$\text{Actual Epoch Time} = \text{Base Epoch Time} \times \left( \frac{1}{\text{GPU Scale Factor}} \right) + \text{Sleep Delay}$$
 
-* `torch.cuda.synchronize()` 호출을 통해 이전 CUDA 커널의 처리를 완료하도록 강제 동기화함.
-* `gpu_scale_factor`가 낮을수록 (예: Spot-A = 0.6) 연산 지연시간이 길어지도록 의도적으로 추가 CPU `time.sleep()`을 부여하여 물리적 속도 차이를 정밀 구현.
-
-### 나. 3대 AI 워크로드 표준 연산 및 지연 기본 사양
-
-1. **이미지 분류 (CNN)**
-   * **모델 및 데이터**: SimpleCNN (3-Layer Conv) + 합성 MNIST 이미지 데이터셋
-   * **Base Epoch Time**: 2.0초
-   * **노드별 실제 1 Epoch 연산 시간**:
-     * Worker-1 (On-Demand, 1.0): **2.0초**
-     * Worker-2-N (Spot-A, 0.6): **3.3초**
-
-2. **시계열 예측 (RNN)**
-   * **모델 및 데이터**: SimpleRNN (2-Layer RNN) + 사인파 합성 시계열 데이터
-   * **Base Epoch Time**: 3.0초
-   * **노드별 실제 1 Epoch 연산 시간**:
-     * Worker-1 (On-Demand, 1.0): **3.0초**
-     * Worker-2-N (Spot-A, 0.6): **5.0초**
-
-3. **자연어 처리 (LSTM)**
-   * **모델 및 데이터**: SimpleLSTM (2-Layer LSTM + Embedding) + 영화 리뷰 합성 텍스트 데이터
-   * **Base Epoch Time**: 4.0초
-   * **노드별 실제 1 Epoch 연산 시간**:
-     * Worker-1 (On-Demand, 1.0): **4.0초**
-     * Worker-2-N (Spot-A, 0.6): **6.7초**
+*   **이미지 분류 (CNN)**: SimpleCNN + MNIST 데이터셋 모사. Base Epoch 2.0초. Spot-A(0.6) 가동 시 1 Epoch 당 3.3초 소요. (연산량 집중)
+*   **시계열 예측 (RNN)**: SimpleRNN + 사인파 합성 데이터 모사. Base Epoch 3.0초. Spot-A(0.6) 가동 시 1 Epoch 당 5.0초 소요.
+*   **자연어 처리 (LSTM)**: SimpleLSTM + 텍스트 데이터 모사. Base Epoch 4.0초. Spot-A(0.6) 가동 시 1 Epoch 당 6.7초 소요. (메모리 사용 유도)
 
 ---
 
@@ -344,4 +246,3 @@ $$\text{Actual Epoch Time} = \text{Base Epoch Time} \times \left( \frac{1}{\text
 * **상세 방안**:
   * **자가 치유 계보(Fault-Tolerance Lineage)**: 워커가 다운되었을 때 이미 완료된 캐시 데이터를 보존한 채, 유실된 서브 DAG 트리의 미완료 연산만 복구하여 인접 노드에 점진적으로 재배정하는 Lineage 기반 자가 치유를 고도화합니다.
   * **탄력성 가드(Auto-scaling Safeguard)**: 노드가 잦은 주기로 생성/삭제(Flapping)되어 발생하는 호스트 부하를 막기 위해 기동 후 최소 유지 시간(Cooldown Time)을 부여하고, 호스트 VM 내부의 실질적 가용 자원 잔여량(`wsl free -b`)을 지속 추적하여 리소스 고갈 상황에서는 선제적으로 스케일 아웃을 보류하는 안전 안전장치를 적용합니다.
-

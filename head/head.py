@@ -21,8 +21,8 @@ from common.config import DEFAULT_HEAD_PORT
 # 모듈화된 구성요소 임포트
 import state #
 import cluster_manager
-import scheduler
-import dashboard
+import head.scheduler.core as scheduler
+import head.dashboard.server as dashboard
 
 class BabyRayHeadServicer(babyray_pb2_grpc.BabyRayServiceServicer):
     """

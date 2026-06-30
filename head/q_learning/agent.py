@@ -43,6 +43,8 @@ class QLearningAgent:
         self.epsilon_min = epsilon_min  # 최소 탐험율
         self.decay_rate = decay_rate    # 감쇄율
         self.q_table_path = q_table_path
+        if q_table_path == "q_table.json":
+            self.q_table_path = os.path.join(os.path.dirname(__file__), "q_table.json")
         
         # Q-테이블 초기화: {(state_str): {action: q_value}}
         self.q_table = {}

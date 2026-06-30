@@ -263,7 +263,7 @@ def serve(worker_id, node_type, port, head_host, head_port):
         while True:
             time.sleep(86400) # 24시간 -> 리소스는 소모 안함
 
-    # ctrl + C
+    # ctrl + C = 종료 gracefull shutdown
     except KeyboardInterrupt:
         print(f"\n[Worker] '{worker_id}' 종료 중...")
         try:

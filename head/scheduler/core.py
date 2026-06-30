@@ -5,25 +5,25 @@ import random
 import threading
 import grpc
 
-# 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가
+# 실행 시 프로젝트 루트 디렉토리를 sys.path에 추가 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
-from q_learning import QLearningAgent
+from head.q_learning.agent import QLearningAgent
 
 # state 모듈을 gcs_state라는 별칭으로 임포트하여 로컬 변수 state와 충돌하지 않게 함
-import state as gcs_state # gcs state (변수, 인메모리 캐시 모음), q-learning state와의 차별을 두기 위해서
-import cluster_manager
-import dashboard
+import head.state as gcs_state # gcs state (변수, 인메모리 캐시 모음), q-learning state와의 차별을 두기 위해서
+import head.cluster_manager as cluster_manager
+import head.dashboard.server as dashboard
 
-from head.scheduler_static import run_static_scheduler_step
-from head.scheduler_dynamic import run_dynamic_scheduler_step
-from head.scheduler_qlearning import run_qlearning_scheduler_step
+from head.scheduler.static import run_static_scheduler_step
+from head.scheduler.dynamic import run_dynamic_scheduler_step
+from head.q_learning.scheduler import run_qlearning_scheduler_step
 
 # Q-Learning 에이전트
-# cost.yaml의 경로를 찾음 (head에서 ../common/cost_model.yaml -> 부모 디렉토리 common 폴더의 cost_model.yaml)
-COST_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../common/cost_model.yaml'))
+# cost.yaml의 경로를 찾음 (head에서 ../../common/cost_model.yaml -> 부모 디렉토리 common 폴더의 cost_model.yaml)
+COST_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../common/cost_model.yaml'))
 agent = QLearningAgent(cost_model_path=COST_MODEL_PATH)
 # 에이전트는 cost_model.yaml에 정의된 비용 모델을 참고해서 학습하거나 행동을 결정하게 됩니다.
 
@@ -41,11 +41,11 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
     """
     # worker_registry -> worker_info를 뽑아서 줌
     ip = worker_info['ip']
-    worker_address = f"[{ip}]:{worker_info['port']}" if ":" in ip else f"{ip}:{worker_info['port']}" # ip:port로 연결.
+    worker_address = f"[{ip}]:{worker_info['port']}" if ":" in ip else f"{ip}:{worker_info['port']}"
     task_id = task["task_id"]
-    model_type = task["model_type"] #CNN, RNN ,LSTM 어떤 건지
-    epochs = task["epochs"] # 몇번 학습할지
-    worker_type = worker_info["node_type"] # gpu/cpu 모델 어떤 건지
+    model_type = task["model_type"]
+    epochs = task["epochs"]
+    worker_type = worker_info["node_type"]
     
     dashboard.log_event(f"[Scheduler Action] >>> 작업 할당 실행: {task_id} ({model_type}) -> 워커 '{worker_id}' ({worker_type})")
     

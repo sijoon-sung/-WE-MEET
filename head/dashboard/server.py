@@ -34,6 +34,28 @@ class DashboardHTTPHandler(http.server.BaseHTTPRequestHandler):
         # HTTP 요청 로그로 콘솔이 어지럽혀지지 않도록 비활성화
         pass
 
+    def serve_static_file(self, filename, content_type):
+        try:
+            # server.py 위치 기준 web/ 폴더 내 파일 반환
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            file_path = os.path.join(current_dir, "web", filename)
+            
+            if os.path.exists(file_path):
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(file_path, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Static File Not Found")
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f"Internal Server Error: {str(e)}".encode("utf-8"))
+
     def do_GET(self):
         global _data_callback
 
@@ -57,11 +79,16 @@ class DashboardHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(data).encode("utf-8"))
             return
 
-        elif self.path == "/":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
+        elif self.path in ["/", "/index.html"]:
+            self.serve_static_file("index.html", "text/html; charset=utf-8")
+            return
+
+        elif self.path == "/style.css":
+            self.serve_static_file("style.css", "text/css; charset=utf-8")
+            return
+
+        elif self.path == "/app.js":
+            self.serve_static_file("app.js", "application/javascript; charset=utf-8")
             return
 
         else:
@@ -88,7 +115,7 @@ def start_dashboard_server(port=8080, data_callback=None):
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
-# --- 프리미엄 글래스모피즘 단일 페이지 대시보드 UI ---
+# 기존 레거시 HTML 상수는 무시 처리합니다.
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ko">

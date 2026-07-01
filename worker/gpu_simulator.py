@@ -11,9 +11,7 @@ from worker.models import (
     HAS_TORCH,
     CNNModel,
     RNNModel,
-    LSTMModel,
-    train_one_epoch,
-    run_model_inference
+    LSTMModel
 )
 if HAS_TORCH:
     import torch 

@@ -17,9 +17,12 @@ def run_dynamic_scheduler_step(MAX_SPOT_SCALE, scale_in_timer, run_task_on_worke
     """
     spot_scale = get_current_spot_scale()
     
-    # 1. 평균 부하 기반 스케일링 정책
+    # 1. 평균 부하 또는 큐 대기 적체 기반 스케일아웃 정책
     with gcs_state.registry_lock:
         active_workers = list(gcs_state.worker_registry.values())
+        
+    with gcs_state.queue_lock:
+        q_len_real = len(gcs_state.task_queue)
     
     if active_workers:
         avg_cpu = sum(info.get("cpu", 0.0) for info in active_workers) / len(active_workers)
@@ -27,14 +30,12 @@ def run_dynamic_scheduler_step(MAX_SPOT_SCALE, scale_in_timer, run_task_on_worke
     else:
         avg_cpu, avg_mem = 0.0, 0.0
         
-    if (avg_cpu > 70.0 or avg_mem > 70.0) and spot_scale < MAX_SPOT_SCALE:
-        dashboard.log_event(f"[Dynamic Scale-Out] 평균 클러스터 부하 과중 감지 (CPU: {avg_cpu:.1f}%, MEM: {avg_mem:.1f}%) -> Spot 노드 증설")
+    # 대기 큐에 작업이 3개 이상 밀렸거나 평균 리소스 부하가 높을 시 스케일아웃
+    if ((avg_cpu > 70.0 or avg_mem > 70.0) or q_len_real >= 3) and spot_scale < MAX_SPOT_SCALE:
+        dashboard.log_event(f"[Dynamic Scale-Out] 대기 큐 적체({q_len_real}개) 또는 고부하 감지 -> Spot 노드 증설")
         if cluster_manager.scale_out_worker("spot_a"):
             spot_scale += 1
             
-    with gcs_state.queue_lock:
-        q_len_real = len(gcs_state.task_queue)
-        
     if q_len_real == 0 and avg_cpu < 20.0 and avg_mem < 20.0:
         scale_in_timer += 1.0
         if scale_in_timer >= 10.0 and spot_scale > 0:
@@ -82,7 +83,12 @@ def run_dynamic_scheduler_step(MAX_SPOT_SCALE, scale_in_timer, run_task_on_worke
             ).start()
             assigned = True
         else:
-            dashboard.log_event(f"[Dynamic Staggered] 간섭 회피: 모든 가용 노드 자원 포화로 {target_task['task_id']} 할당 보류 및 지연.")
+            # 5초에 한 번씩만 스팸 방지용으로 로그 기록
+            cur_time = time.time()
+            last_log = getattr(run_dynamic_scheduler_step, "_last_log_time", 0.0)
+            if cur_time - last_log >= 5.0:
+                dashboard.log_event(f"[Dynamic Staggered] 간섭 회피: 모든 가용 노드 자원 포화로 {target_task['task_id']} 할당 보류 및 지연 (대기 중)")
+                run_dynamic_scheduler_step._last_log_time = cur_time
             
         if not assigned:
             with gcs_state.queue_lock:

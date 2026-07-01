@@ -2,6 +2,9 @@ import os
 import psutil # 호스트의 물리 메모리 사용량을 얻기 위해 사용
 import subprocess #docker sdk를 import하기 위해 
 import docker #docker SDK
+import threading
+import time
+import random
 
 # 공유 상태 및 대시보드 모듈 임포트
 import head.state as state # state = 시스템의 전역 변수를 가지고 있음
@@ -281,6 +284,9 @@ def scale_out_worker(node_type):
                 "HEAD_HOST": "babyray-head",
                 "HEAD_PORT": "50051",
                 "PYTHONUNBUFFERED": "1"
+            },
+            volumes={
+                "babyray-data": {"bind": "/app/data", "mode": "rw"}
             }
         )
 

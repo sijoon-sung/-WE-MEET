@@ -1,8 +1,6 @@
 import os
 import torch
 import torch.nn as nn
-import torchvision
-import torchvision.transforms as transforms
 from worker.models.base import BaseTask
 
 # CNN 학습 하이퍼파라미터
@@ -10,6 +8,73 @@ CNN_BATCH_SIZE = 4
 CNN_NUM_BATCHES = 3
 CNN_IMAGE_SIZE = 28
 CNN_NUM_CLASSES = 10
+
+def get_inline_mnist_dataset():
+    """
+    외부 네트워크 다운로드 없이, 파이썬 파일 임포트 형태로 
+    즉시 연산 가능한 0~9 손글씨 모사 28x28 픽셀 패턴 데이터셋을 반환합니다.
+    """
+    images = []
+    labels = []
+    
+    for digit in range(10):
+        # 28x28 픽셀 맵
+        img = torch.zeros(1, 28, 28)
+        
+        # 각 숫자의 전형적인 뼈대 픽셀을 명시적으로 활성화
+        if digit == 0:
+            img[0, 5:23, 5] = 1.0
+            img[0, 5:23, 22] = 1.0
+            img[0, 5, 5:23] = 1.0
+            img[0, 22, 5:23] = 1.0
+        elif digit == 1:
+            img[0, 3:25, 14] = 1.0
+        elif digit == 2:
+            img[0, 5, 5:23] = 1.0
+            img[0, 5:14, 22] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 14:23, 5] = 1.0
+            img[0, 22, 5:23] = 1.0
+        elif digit == 3:
+            img[0, 5, 5:23] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 22, 5:23] = 1.0
+            img[0, 5:23, 22] = 1.0
+        elif digit == 4:
+            img[0, 5:14, 5] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 5:23, 22] = 1.0
+        elif digit == 5:
+            img[0, 5, 5:23] = 1.0
+            img[0, 5:14, 5] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 14:23, 22] = 1.0
+            img[0, 22, 5:23] = 1.0
+        elif digit == 6:
+            img[0, 5:23, 5] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 22, 5:23] = 1.0
+            img[0, 14:23, 22] = 1.0
+        elif digit == 7:
+            img[0, 5, 5:23] = 1.0
+            img[0, 5:23, 22] = 1.0
+        elif digit == 8:
+            img[0, 5:23, 5] = 1.0
+            img[0, 5:23, 22] = 1.0
+            img[0, 5, 5:23] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 22, 5:23] = 1.0
+        elif digit == 9:
+            img[0, 5:14, 5] = 1.0
+            img[0, 5, 5:23] = 1.0
+            img[0, 14, 5:23] = 1.0
+            img[0, 5:23, 22] = 1.0
+            
+        images.append(img)
+        labels.append(torch.tensor(digit, dtype=torch.long))
+        
+    # 배치 형성을 위해 데이터셋 샘플을 적당히 복제하여 증강 반환
+    return torch.stack(images * 4), torch.stack(labels * 4)
 
 class CNNModel(nn.Module):
     """3-Layer Conv + BatchNorm + Dropout 기반 이미지 분류 합성곱 신경망 (CNN)"""
@@ -47,31 +112,20 @@ class CNNTask(BaseTask):
         return nn.CrossEntropyLoss()
 
     def train_epoch(self, model, optimizer, criterion, device):
-        data_loader = None
-        try:
-            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-            train_dataset = torchvision.datasets.MNIST(root='./data_mnist', train=True, download=True, transform=transform)
-            data_loader = torch.utils.data.DataLoader(train_dataset, batch_size=CNN_BATCH_SIZE, shuffle=True)
-            data_iter = iter(data_loader)
-        except Exception:
-            data_iter = None
-
+        # 인라인으로 구현된 로컬 손글씨 모사 픽셀 데이터셋 임포트
+        images, targets = get_inline_mnist_dataset()
+        images, targets = images.to(device), targets.to(device)
+        
         loss_val = 0.0
         for _ in range(CNN_NUM_BATCHES):
-            if data_iter is not None:
-                try:
-                    inputs, targets = next(data_iter)
-                    inputs, targets = inputs.to(device), targets.to(device)
-                except (StopIteration, Exception):
-                    inputs = torch.randn(CNN_BATCH_SIZE, 1, CNN_IMAGE_SIZE, CNN_IMAGE_SIZE, device=device)
-                    targets = torch.randint(0, CNN_NUM_CLASSES, (CNN_BATCH_SIZE,), device=device)
-            else:
-                inputs = torch.randn(CNN_BATCH_SIZE, 1, CNN_IMAGE_SIZE, CNN_IMAGE_SIZE, device=device)
-                targets = torch.randint(0, CNN_NUM_CLASSES, (CNN_BATCH_SIZE,), device=device)
-
+            # 난수 셔플 인덱싱으로 배치 분할
+            indices = torch.randperm(images.size(0))[:CNN_BATCH_SIZE]
+            inputs = images[indices]
+            batch_targets = targets[indices]
+            
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            loss = criterion(outputs, batch_targets)
             loss.backward()
             optimizer.step()
             loss_val = loss.item()
@@ -82,7 +136,10 @@ class CNNTask(BaseTask):
         model.eval()
         try:
             with torch.no_grad():
-                test_img = torch.randn(1, 1, CNN_IMAGE_SIZE, CNN_IMAGE_SIZE, device=device)
+                # 인라인 데이터셋 생성 후 숫자 '3'에 대응하는 패턴 이미지 추출
+                images, _ = get_inline_mnist_dataset()
+                test_img = images[3:4].to(device) # [1, 1, 28, 28]
+                
                 out = model(test_img)
                 prob = torch.softmax(out, dim=1)
                 conf, pred = torch.max(prob, dim=1)

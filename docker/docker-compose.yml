@@ -4,6 +4,9 @@ networks:
   babyray-net:
     driver: bridge
 
+volumes:
+  babyray-data: # 워커 가중치 공유 볼륨
+
 services:
   # GCS 및 Q-learning 스케줄러를 구동하는 Head 관리 노드
   head:
@@ -15,6 +18,7 @@ services:
     command: python -m head.head
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock # 호스트 Docker 데몬 연동
+      - babyray-data:/app/data # 공유 데이터 폴더 마운트
     ports:
       - "50051:50051" # gRPC 포트
       - "8080:8080" # 모니터링 대시보드 포트 추가
@@ -41,6 +45,8 @@ services:
     depends_on:
       - head
     command: python -m worker.worker --id worker-1 --type on_demand --port 50052
+    volumes:
+      - babyray-data:/app/data # 공유 데이터 폴더 마운트
     deploy:
       resources:
         limits:

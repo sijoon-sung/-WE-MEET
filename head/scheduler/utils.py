@@ -147,18 +147,24 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                         if info["status"] == "IDLE"
                     ]
                 
-                if not reduce_candidates:
-                    dashboard.log_event(f"[Reduce Task] 가용한 IDLE 워커가 없어 2초 대기")
-                    time.sleep(2.0)
-                    with gcs_state.registry_lock:
-                        reduce_candidates = [
-                            (wid, info) for wid, info in gcs_state.worker_registry.items()
-                            if info["status"] == "IDLE"
-                        ]
+                # Reduce는 회수(Eviction) 위험이 없는 안정적인 on_demand 노드로 전용 고정(Pinning)합니다.
+                reduce_worker_id = None
+                reduce_worker_info = None
                 
-                if reduce_candidates:
-                    on_demand_candidates = [c for c in reduce_candidates if c[1]["node_type"] == "on_demand"]
-                    reduce_worker_id, reduce_worker_info = on_demand_candidates[0] if on_demand_candidates else reduce_candidates[0]
+                while True:
+                    with gcs_state.registry_lock:
+                        on_demand_candidates = [
+                            (wid, info) for wid, info in gcs_state.worker_registry.items()
+                            if info["node_type"] == "on_demand" and info["status"] == "IDLE"
+                        ]
+                    if on_demand_candidates:
+                        reduce_worker_id, reduce_worker_info = on_demand_candidates[0]
+                        break
+                    else:
+                        dashboard.log_event(f"[Reduce Task] 온디맨드 가용 IDLE 워커(worker-1) 대기 중...")
+                        time.sleep(1.0)
+                
+                if reduce_worker_id:
                     
                     with gcs_state.registry_lock:
                         if reduce_worker_id in gcs_state.worker_registry:

@@ -50,16 +50,21 @@ WE-MEET/
 ## 🚀 기동 및 실행 가이드
 
 ### 1. Docker Compose 기반 클러스터 기동 (권장)
-Head Node와 온디맨드 Worker-1 컨테이너를 가상 네트워크상에 빌드 및 자동 연계하여 띄웁니다.
-```bash
-# 1. 클러스터 전체 빌드 및 백그라운드 가동
-docker-compose -f docker/docker-compose.yml up --build -d
+동적 스케일링 중인 탄력 워커 노드들의 안전한 라이프사이클 관리와 셧다운 시 리소스 누수(Network Resource is still in use)를 완천 차단하기 위해 고정 외부 브릿지 네트워크를 이용합니다.
 
-# 2. 실행 로그 모니터링 (실시간 출력)
-docker-compose -f docker/docker-compose.yml logs -f
+```bash
+# 1. 외부 결합 브릿지 네트워크 사전 생성 (최초 1회 필수 실행)
+docker network create babyray-net
+
+# 2. 클러스터 전체 빌드 및 가동
+docker-compose -f docker/docker-compose.yml up --build
 ```
 
-*   **실시간 모니터링 웹 대시보드**: 브라우저를 열어 [http://localhost:8080](http://localhost:8080) 에 접속하면 현재 큐 상태, 활성 노드 수, 그리고 가상 예산 소모량을 시각적으로 감시할 수 있습니다.
+*   **실시간 모니터링 웹 대시보드**: 브라우저를 열어 [http://localhost:8080](http://localhost:8080) 에 접속하면 프리미엄 다크모드 글래스모피즘 화면을 통해 현재 큐 상태, 강화학습 지표(Epsilon), 워커 풀별 라이브 트랜지션 스케일인/아웃 애니메이션을 볼 수 있습니다.
+*   **자원 가드 우회(Bypass) 꿀팁**:
+    로컬 시스템 가용 메모리가 부족하여 시작 직후 스케일아웃 경고 로그가 지속된다면, 아래 환경 변수를 부여하여 호스트의 안전 검사를 강제 바이패스해 볼 수 있습니다.
+    * **PowerShell:** `$env:BYPASS_RESOURCE_GUARD="1"; docker-compose -f docker/docker-compose.yml up --build`
+    * **Bash/CMD:** `BYPASS_RESOURCE_GUARD=1 docker-compose -f docker/docker-compose.yml up --build`
 *   **클러스터 중단 및 완전 회수**:
     ```bash
     docker-compose -f docker/docker-compose.yml down

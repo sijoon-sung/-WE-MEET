@@ -25,7 +25,7 @@ completed_tasks_cache = {}
 """dict: 완료된 태스크 ID별 결과물 캐시 여부 (True/False) 관리 레포지토리."""
 
 # 전역 가상 자산 관리 변수
-virtual_budget = 1.0  # 초기 예산 $1.0달러 (현실적인 AWS 요율과 밸런싱을 맞추기 위해 1.0달러로 조정)
+virtual_budget = 10.0  # 초기 예산 $10.0달러 (현실적인 AWS 요율과 밸런싱을 맞추기 위해 10.0달러로 조정)
 """float: 현재 사용 가능한 가상 잔여 예산 ($)."""
 
 task_counter = 0        # 고유한 TASK ID 생성을 위한 카운터 변수

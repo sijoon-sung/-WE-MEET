@@ -9,6 +9,7 @@ import os
 import sys # 모듈 검색 경로 조작 sys
 import psutil
 import threading
+import signal
 
 # 실행 시 프로젝트 루트 디렉토리 및 현재 디렉토리를 sys.path에 추가하여 패키지들을 정상적으로 찾을 수 있도록 설정합니다.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -161,11 +162,24 @@ def get_dashboard_data():
         workers = {wid: info.copy() for wid, info in state.worker_registry.items()}
     with state.queue_lock:
         queue = [t.copy() for t in state.task_queue]
+
+    # 완료/실패 태스크 통계 계산
+    total_completed = sum(1 for status in state.task_status.values() if status in ["SUCCESS", "COMPLETED"])
+    total_failed = sum(1 for status in state.task_status.values() if status == "FAILED")
+
+    # Q-Learning Agent의 훈련 파라미터 획득
+    from head.scheduler.utils import agent
+    q_epsilon = getattr(agent, "epsilon", 0.0)
+
     # 대시보드 웹 API가 JSON 포맷 등으로 파싱하기 편하도록 최종 마스터 데이터 구조 구축
     return {
         "virtual_budget": state.virtual_budget,
+        "scheduler_mode": state.SCHEDULER_MODE,
         "workers": workers,
         "queue": queue,
+        "total_completed": total_completed,
+        "total_failed": total_failed,
+        "q_epsilon": q_epsilon,
         "host_cpu": psutil.cpu_percent(),
         "host_mem": psutil.virtual_memory().percent,
         "gpu_free_vram": cluster_manager.get_gpu_free_memory()
@@ -203,12 +217,29 @@ def serve():
     scheduler_thread = threading.Thread(target=scheduler.scheduler_loop, daemon=True)
     scheduler_thread.start()
     
+    def handle_shutdown(signum, frame):
+        print(f"\n[Head] 종료 시그널 수신 (Signal: {signum}). Graceful Shutdown 시작...")
+        try:
+            server.stop(0)
+        except Exception:
+            pass
+        try:
+            print("[Head] 기동 중인 모든 동적 스팟 워커 컨테이너들을 일괄 청소합니다...")
+            cluster_manager.cleanup_zombie_containers()
+        except Exception as e:
+            print(f"[Head] 동적 컨테이너 소거 실패: {e}")
+        print("[Head] Graceful Shutdown 완료. 프로세스를 안전하게 종료합니다.")
+        sys.exit(0)
+
+    # SIGINT(Ctrl+C) 및 SIGTERM(도커 정지) 등록
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
     try:
         while True:
             time.sleep(86400)
     except KeyboardInterrupt:
-        print("[Head] 서버 종료 시퀀스를 구동합니다...")
-        server.stop(0)
+        handle_shutdown(signal.SIGINT, None)
 
 if __name__ == '__main__':
     serve()

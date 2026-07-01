@@ -51,6 +51,11 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         )
         
         if is_map_reduce:
+            # 맵-리듀스로 분배 연산이 진행되므로, 원래 이 스레드의 주체 워커 락을 풀어주어 맵/리듀스 풀에 참가시킵니다 (데드락 방지).
+            with gcs_state.registry_lock:
+                if worker_id in gcs_state.worker_registry:
+                    gcs_state.worker_registry[worker_id]["status"] = "IDLE"
+
             dashboard.log_event(f"[Map-Reduce] {task_id} 병렬 학습 분할 개시. 가용 IDLE 워커 수: {len(available_idle_workers)}")
             
             # 1. 쪼갤 대수 결정 (최대 3분할)

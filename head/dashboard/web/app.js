@@ -14,7 +14,7 @@ function colorizeLog(msg) {
     if (msg.includes("완료 성공") || msg.includes("성공") || msg.includes("SUCCESS") || msg.includes("가동") || msg.includes("연결 성공") || msg.includes("복구")) {
         return `<span style="color: #10b981; font-weight: 500;">${msg}</span>`;
     }
-    if (msg.includes("[Scheduler Action]") || msg.includes("SCALE_OUT") || msg.includes("SCALE_IN") || msg.includes("트리거") || msg.includes("스케일아웃") || msg.includes("증설") || msg.includes("회수")) {
+    if (msg.includes("[Scheduler Action]") || msg.includes("SCALE_OUT") || msg.includes("SCALE_IN") || msg.includes("트리거") || msg.includes("스케일아웃") || msg.includes("증설") || msg.includes("회수") || msg.includes("[Dynamic Scale-Out]") || msg.includes("[Dynamic Scale-In]")) {
         return `<span style="color: #c084fc; font-weight: 600;">${msg}</span>`;
     }
     if (msg.includes("Heartbeat 수신") || msg.includes("하트비트")) {
@@ -74,7 +74,7 @@ function createWorkerCard(wid, info) {
         </div>
     `;
 
-    // 0.1초 뒤 트랜지션 엔터 효과
+    // 0.05초 뒤 트랜지션 엔터 효과
     requestAnimationFrame(() => {
         setTimeout(() => {
             card.classList.remove("scale-up-enter");
@@ -124,24 +124,38 @@ function updateWorkerCard(wid, card, info) {
     }
 }
 
-// 워커 노드 실시간 갱신 오케스트레이션 (Scale-in/out 트랜지션 탑재)
+// 워커 노드 실시간 갱신 오케스트레이션 (온디맨드/스팟 분산 Reconciler)
 function reconcileWorkers(workersData) {
-    const container = document.getElementById("workers-container");
+    const ondemandContainer = document.getElementById("ondemand-container");
+    const spotContainer = document.getElementById("spot-container");
     const incomingWorkerIds = new Set(Object.keys(workersData));
 
-    // 1. Placeholder 제거 (첫 기동 시)
-    const placeholder = container.querySelector(".empty-placeholder");
-    if (placeholder && incomingWorkerIds.size > 0) {
-        container.removeChild(placeholder);
-    }
+    // 1. Placeholder 제거
+    const odPlaceholder = ondemandContainer.querySelector(".empty-placeholder-mini");
+    const spPlaceholder = spotContainer.querySelector(".empty-placeholder-mini");
 
-    // 2. Scale-Out & Update
+    let odCount = 0;
+    let spCount = 0;
+
+    // 2. 분류 카운트 세기
     incomingWorkerIds.forEach(wid => {
         const info = workersData[wid];
+        if (info.node_type === "on_demand") odCount++;
+        else spCount++;
+    });
+
+    if (odPlaceholder && odCount > 0) ondemandContainer.removeChild(odPlaceholder);
+    if (spPlaceholder && spCount > 0) spotContainer.removeChild(spPlaceholder);
+
+    // 3. Scale-Out & Update
+    incomingWorkerIds.forEach(wid => {
+        const info = workersData[wid];
+        const targetContainer = info.node_type === "on_demand" ? ondemandContainer : spotContainer;
+
         if (!activeWorkersMap.has(wid)) {
             // New worker detected -> Scale-Out animation!
             const newCard = createWorkerCard(wid, info);
-            container.appendChild(newCard);
+            targetContainer.appendChild(newCard);
             activeWorkersMap.set(wid, newCard);
         } else {
             // Existing worker -> update metrics only
@@ -150,7 +164,7 @@ function reconcileWorkers(workersData) {
         }
     });
 
-    // 3. Scale-In (제거 및 축소 페이드아웃 애니메이션)
+    // 4. Scale-In (제거 및 축소 페이드아웃 애니메이션)
     activeWorkersMap.forEach((card, wid) => {
         if (!incomingWorkerIds.has(wid)) {
             // Worker gone -> Scale-In animation!
@@ -159,19 +173,21 @@ function reconcileWorkers(workersData) {
             
             // 0.5초 트랜지션 완료 후 DOM에서 삭제
             setTimeout(() => {
-                if (card.parentNode === container) {
-                    container.removeChild(card);
+                if (card.parentNode) {
+                    card.parentNode.removeChild(card);
                 }
                 activeWorkersMap.delete(wid);
 
-                // 만약 모든 워커가 다 제거되었다면 placeholder 다시 복구
-                if (activeWorkersMap.size === 0) {
-                    container.innerHTML = `
-                        <div class="empty-placeholder">
-                            <div class="empty-icon">🔌</div>
-                            <p>활성화된 워커 노드가 존재하지 않습니다.<br>하트비트 신호를 대기하고 있습니다.</p>
-                        </div>
-                    `;
+                // 만약 특정 풀이 다 비어버렸다면 placeholder 다시 복원
+                const activeList = Array.from(activeWorkersMap.keys());
+                const remainingOndemand = activeList.some(id => workersData[id] && workersData[id].node_type === "on_demand");
+                const remainingSpot = activeList.some(id => workersData[id] && workersData[id].node_type !== "on_demand");
+
+                if (!remainingOndemand && !ondemandContainer.querySelector(".empty-placeholder-mini")) {
+                    ondemandContainer.innerHTML = `<div class="empty-placeholder-mini">워커 감지 중...</div>`;
+                }
+                if (!remainingSpot && !spotContainer.querySelector(".empty-placeholder-mini")) {
+                    spotContainer.innerHTML = `<div class="empty-placeholder-mini">가용한 스팟 인스턴스가 없습니다.</div>`;
                 }
             }, 500);
         }
@@ -186,11 +202,25 @@ async function updateDashboard() {
         
         const data = await response.json();
         
-        // 1. GCS Status 상태 바인딩
+        // GCS Status 상태 바인딩
         const statusContainer = document.getElementById("status-container");
         const statusText = document.getElementById("status-text");
         statusContainer.className = "system-status online";
         statusText.innerText = "GCS ONLINE";
+
+        // 1. Global Stats Banner 갱신
+        if (data.scheduler_mode !== undefined) {
+            document.getElementById("scheduler-mode-val").innerText = data.scheduler_mode.toUpperCase();
+        }
+        if (data.total_completed !== undefined) {
+            document.getElementById("completed-tasks-val").innerText = data.total_completed;
+        }
+        if (data.total_failed !== undefined) {
+            document.getElementById("failed-tasks-val").innerText = data.total_failed;
+        }
+        if (data.q_epsilon !== undefined) {
+            document.getElementById("rl-epsilon-val").innerText = data.q_epsilon.toFixed(3);
+        }
 
         // 2. Budget 예산 갱신
         if (data.virtual_budget !== undefined) {
@@ -213,13 +243,14 @@ async function updateDashboard() {
                 document.getElementById("gpu-vram-bar").style.width = "0%";
             } else {
                 document.getElementById("gpu-vram-val").innerText = `${freeVram} MiB`;
-                // 8GB를 100% 기준치로 상정
                 const pct = Math.min(100, (freeVram / 8192) * 100);
                 document.getElementById("gpu-vram-bar").style.width = `${pct}%`;
             }
         }
 
-        // 4. Workers Reconciler
+        // 4. Workers Reconciler 기동
+        const workersList = Object.keys(data.workers || {});
+        document.getElementById("worker-count").innerText = `총 ${workersList.length}대 가동 중`;
         reconcileWorkers(data.workers || {});
 
         // 5. Task Queue 갱신
@@ -250,11 +281,22 @@ async function updateDashboard() {
                 if (secondsLeft < 12) barColor = "orange";
                 if (secondsLeft < 5 || isOverdue) barColor = "var(--accent-red)";
 
+                // Map-Reduce 특수 서브태스크 배지 시각화
+                let modelBadgeClass = "task-model-badge";
+                let modelText = task.model_type;
+                if (task.task_id.includes("-map-")) {
+                    modelBadgeClass += " badge-purple";
+                    modelText += " (MAP)";
+                } else if (task.task_id.includes("-reduce")) {
+                    modelBadgeClass += " badge-blue";
+                    modelText += " (REDUCE)";
+                }
+
                 html += `
                     <div class="task-card" style="${isOverdue ? 'border-color: rgba(244, 63, 94, 0.35);' : ''}">
                         <div class="task-header">
                             <span class="task-id">${task.task_id}</span>
-                            <span class="task-model-badge">${task.model_type}</span>
+                            <span class="${modelBadgeClass}">${modelText}</span>
                         </div>
                         <div class="task-details">
                             <span>Epochs: ${task.epochs}회</span>
@@ -291,6 +333,6 @@ async function updateDashboard() {
     }
 }
 
-// 1.2초 주기로 타이트하게 동적 모니터링 갱신 기동
+// 1.2초 주기로 동적 모니터링 갱신 기동
 setInterval(updateDashboard, 1200);
 updateDashboard();

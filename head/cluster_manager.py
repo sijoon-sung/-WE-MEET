@@ -80,8 +80,11 @@ def is_host_resource_sufficient():
     호스트 시스템(Windows 및 WSL2/Docker 환경 포함)의 실시간 물리 메모리 가용량을 점검하여 자원 임계치 안전 여부를 판정합니다.
 
     Returns:
-        bool: WSL2 및 호스트 가용 메모리가 3.0GB 이상인 경우 True, 미만인 경우 False.
+        bool: WSL2 및 호스트 가용 메모리가 4.0GB 이상인 경우 True, 미만인 경우 False.
     """
+    # 환경변수 BYPASS_RESOURCE_GUARD가 "1"인 경우 자원 검사를 강제 통과시킵니다 (로컬 실습/테스트용).
+    if os.environ.get("BYPASS_RESOURCE_GUARD", "0") == "1":
+        return True
     # [Safety Guard 임계값 3.0GB 선정 이유]
     # RAM 초과 시 컴퓨터 과부하(버벅임 및 VM 다운)를 방지하기 위한 안전장치입니다.
     # 신규 워커 생성 메모리(1.0GB) + 시스템 최소 생존 버퍼(2.0GB)를 고려해 총 3.0GB로 설정하였습니다.
@@ -103,8 +106,9 @@ def is_host_resource_sufficient():
                     parts = line.split()
                     if len(parts) >= 7:
                         wsl_available_gb = int(parts[6]) / (1024 ** 3)
-                        if wsl_available_gb < 3.0:
-                            print(f"[Global Resource Guard] WSL2 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 3.0 GB (Safety Guard)")
+                        if wsl_available_gb < 4.0:
+                            print(f"[Global Resource Guard] WSL2 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 4.0 GB (Safety Guard)")
+                            print("[Global Resource Guard] 해결 방법: WSL2/Docker Desktop 메모리 제한 설정을 4GB 이상으로 늘려주세요.")
                             return False
                         print(f"[Global Resource Guard] WSL2 가용 물리 메모리 양호: {wsl_available_gb:.2f} GB")
         else:
@@ -119,8 +123,8 @@ def is_host_resource_sufficient():
                     parts = line.split()
                     if len(parts) >= 7:
                         wsl_available_gb = int(parts[6]) / (1024 ** 3)
-                        if wsl_available_gb < 3.0:
-                            print(f"[Global Resource Guard] 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 3.0 GB (Safety Guard)")
+                        if wsl_available_gb < 4.0:
+                            print(f"[Global Resource Guard] 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 4.0 GB (Safety Guard)")
                             return False
     except Exception:
         pass
@@ -129,8 +133,8 @@ def is_host_resource_sufficient():
     try:
         mem = psutil.virtual_memory()
         available_gb = mem.available / (1024 ** 3)
-        if available_gb < 3.0:
-            print(f"[Global Resource Guard] 호스트 가용 물리 메모리 부족 경고: {available_gb:.2f} GB < 3.0 GB (Safety Guard)")
+        if available_gb < 4.0:
+            print(f"[Global Resource Guard] 호스트 가용 물리 메모리 부족 경고: {available_gb:.2f} GB < 4.0 GB (Safety Guard)")
             return False
         return True
     except Exception as e:

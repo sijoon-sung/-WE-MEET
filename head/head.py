@@ -191,9 +191,8 @@ def serve():
     Head Node 메인 서비스 데몬을 구동합니다.
     좀비 컨테이너 소거 비동기 스레드, 대시보드 웹 서버, gRPC 서버, Q-Learning 백그라운드 스케줄러 루프를 초기화합니다.
     """
-    # 0. 잔존 좀비 컨테이너 비동기 청소 (부팅 블로킹 방지 및 자원 회수 보장)
-    # target = 실행할 함수 / daemon = True -> 메인 프로세스와 함께 종료
-    threading.Thread(target=cluster_manager.cleanup_zombie_containers, daemon=True).start()
+    # 0. 잔존 좀비 컨테이너 동기 청소 (부팅 전 이전 라이프사이클의 잔재 완전 소거를 통한 정합성 확보)
+    cluster_manager.cleanup_zombie_containers()
     
     # 0.1. 스팟 강제 회수(Eviction) 모니터링 백그라운드 루프 작동
     cluster_manager.start_spot_eviction_loop() # cluster_manger.py 참고

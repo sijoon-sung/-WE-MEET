@@ -2,7 +2,7 @@ version: '3.8'
 
 networks:
   babyray-net:
-    driver: bridge
+    external: true
 
 volumes:
   babyray-data: # 워커 가중치 공유 볼륨

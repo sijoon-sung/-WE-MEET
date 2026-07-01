@@ -246,3 +246,10 @@ $$\text{Actual Epoch Time} = \text{Base Epoch Time} \times \left( \frac{1}{\text
 * **상세 방안**:
   * **자가 치유 계보(Fault-Tolerance Lineage)**: 워커가 다운되었을 때 이미 완료된 캐시 데이터를 보존한 채, 유실된 서브 DAG 트리의 미완료 연산만 복구하여 인접 노드에 점진적으로 재배정하는 Lineage 기반 자가 치유를 고도화합니다.
   * **탄력성 가드(Auto-scaling Safeguard)**: 노드가 잦은 주기로 생성/삭제(Flapping)되어 발생하는 호스트 부하를 막기 위해 기동 후 최소 유지 시간(Cooldown Time)을 부여하고, 호스트 VM 내부의 실질적 가용 자원 잔여량(`wsl free -b`)을 지속 추적하여 리소스 고갈 상황에서는 선제적으로 스케일 아웃을 보류하는 안전 안전장치를 적용합니다.
+
+---
+
+## 9. 분산 P2P 통신의 성능 오버헤드 및 극복 방향성
+
+현재의 파일 공유 볼륨 기반 통신은 텐서 크기가 커질수록 극심한 디스크 I/O 병목을 초래하므로, 상용 분산 학습 환경(Ray, PyTorch DDP)에서는 공유 메모리(Plasma Object Store) 및 NCCL 기반 P2P 직접 통신(All-Reduce)을 활용합니다.
+P2P 전송 방식은 통신 도중 노드가 탈퇴하거나 유실되었을 때 링 구조가 붕괴되는 치명적인 복잡성을 수반하지만, 이는 Rendezvous 합의 백엔드(etcd 등)를 통해 노드 멤버십 변화를 감지하고 가상 Rank를 실시간 재부팅하는 링 재구성(Re-rendezvous)과 Rank 0 기준의 가중치 Broadcast 강제 동기화 기법을 통해 안정적으로 극복됩니다.

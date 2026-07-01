@@ -23,7 +23,8 @@
 ### 3. [자원가드/확장성] 호스트 물리 메모리 가드(Safety Guard) 상향 및 스케일 상한선 상향
 * **해결 및 패치 내용:**
   - 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`3.0 GB`**로 상향하고, PC의 급격한 과부하(Swap 지연 및 VM 다운)를 사전에 차단하기 위한 설명 주석을 보강하였습니다.
-  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **5대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **10대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+
 
 ### 4. [인프라 제어/격리] PyTorch 물리 GPU VRAM 할당 격리 제한 (VRAM Guard) 구현
 * **발생 현상 & 배경:**

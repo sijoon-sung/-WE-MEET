@@ -67,6 +67,11 @@ class QLearningAgent:
                 "spot_b": {"cost_per_hour": 0.2, "gpu_scale_factor": 0.3}
             }
 
+        # 보상 설계용 핵심 가중치 상수
+        self.SUCCESS_REWARD = 10.0
+        self.COST_WEIGHT = 2.0
+        self.DELAY_PENALTY_WEIGHT = 5.0
+
         # 행동 정의 (Action Space) - Spot-B(Action 2) 제거에 따른 4개 액션 최적화
         # 0: ASSIGN_OD (On-demand 배정), 1: ASSIGN_SPOT (Spot-A 배정)
         # 2: HOLD (대기열 지연 보류), 3: SCALE_OUT (Spot 추가 동적 증설)
@@ -200,7 +205,7 @@ class QLearningAgent:
         
         # 1. SLA 완료 보너스
         if success:
-            reward += 10.0
+            reward += self.SUCCESS_REWARD
             
         # 2. 실행 비용 감점 (Cost_run = Cost_worker * Time_execution)
         # 시간당 요금 모델을 초 단위로 환산하여 감산 적용
@@ -209,11 +214,11 @@ class QLearningAgent:
         execution_cost = cost_per_hour * (execution_time / 3600.0)
         
         # 비용 가중치를 곱하여 보상에서 차감 (예산 절약 유도)
-        reward -= 2.0 * execution_cost
+        reward -= self.COST_WEIGHT * execution_cost
         
-        # 3. 지연 페널티 (SLA 마감 기한 초과 시 초당 -5.0 감점)
+        # 3. 지연 페널티 (SLA 마감 기한 초과 시 초당 페널티 감점)
         if deadline_exceeded:
-            reward -= 5.0 * delay_time
+            reward -= self.DELAY_PENALTY_WEIGHT * delay_time
             
         return reward
 

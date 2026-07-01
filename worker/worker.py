@@ -21,7 +21,6 @@ from gpu_simulator import PyTorchTaskRunner
 
 
 # --- 1. Worker gRPC 서비스 서버 구현 ---
-
 class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
     """
     Baby Ray Worker Node의 gRPC 서비스 처리를 전담하는 서비서 클래스입니다.

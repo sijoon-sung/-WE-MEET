@@ -28,8 +28,8 @@
 * **호스트 물리 메모리 가드(Safety Guard) 기준 상향**:
   - **해결 및 패치 내용:** 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`3.0 GB`**로 상향하였습니다. 
   - 스팟 워커 1대 점유 한계(최대 1.0GB)와 호스트 OS/Head 노드/On-Demand 워커 등의 최소 작동 마진(2.0GB)을 합산하여, 메모리 과부하(Swap 지연 및 VM 다운)를 사전에 선제 차단하는 안전장치를 견고히 다졌습니다.
-* **최대 스팟 스케일 상한선(`MAX_SPOT_SCALE`) 5대로 확장**:
-  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 동시 가동 제한 수를 기존 3대에서 **5대**로 확장하여, 이기종 노드들이 폭넓게 확장되는 시뮬레이션 동작을 풍부하게 관찰할 수 있도록 변경했습니다.
+* **최대 스팟 스케일 상한선(`MAX_SPOT_SCALE`) 10대로 확장**:
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 동시 가동 제한 수를 기존 3대에서 **10대**로 확장하여, 이기종 노드들이 풍폭넓게 병렬로 확장되는 시뮬레이션 동작을 풍부하게 관찰할 수 있도록 변경했습니다.
 
 ---
 

@@ -77,15 +77,15 @@ class QLearningAgent:
 
     def _state_to_str(self, state):
         """
-        상태 튜플 (q_len, active_bitmap, budget_level)을 Q-Table key용 문자열로 변환합니다.
+        상태 튜플 (t_profile, w_active, p_spot, b_level)을 Q-Table key용 문자열로 변환합니다.
 
         Args:
-            state (tuple): (큐 크기, 활성 비트맵, 예산 수준) 형태의 튜플.
+            state (tuple): (대기열 프로파일, 활성비트맵, 요금위험도, 예산 수준) 형태의 튜플.
 
         Returns:
-            str: "큐크기_비트맵_예산수준" 형식의 문자열 키.
+            str: "프로파일_비트맵_요금위험도_예산수준" 형식의 문자열 키.
         """
-        return f"{state[0]}_{state[1]}_{state[2]}"
+        return f"{state[0]}_{state[1]}_{state[2]}_{state[3]}"
 
     def get_q_value(self, state, action):
         """

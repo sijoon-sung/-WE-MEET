@@ -4,6 +4,36 @@
 
 ---
 
+## 📅 2026-07-01 패치 내역
+
+### 1. [GCS/안정화] `RegisterWorker` 중복 ID 등록 세션 충돌 방지 로직 신설
+* **발생 현상 & 배경:**
+  - 동일한 `worker_id`를 가진 워커가 실수로 중복 기동되는 경우, 검증 없이 GCS 레지스트리의 기존 정보를 덮어씌워 통신 세션 및 모니터링 메트릭이 꼬이는 장애가 있었습니다.
+* **해결 및 패치 내용:**
+  - [head/head.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/head.py)의 등록 API 내부에 중복 검증 로직을 추가했습니다. 등록 시점에 `worker_id`가 이미 등록되어 있다면 경고 로그를 남기고 실패 응답(`success=False`)을 보내어 세션 침범을 완벽히 방어하였습니다.
+
+### 2. [인프라/스케일링] 이기종 Spot-B 워커 노드 동적 스케일링 완전 연동
+* **발생 현상 & 배경:**
+  - 기존 설계 파일에는 Spot-B 노드가 명시되어 있었으나, 컨테이너 관리 모듈에서 실제 Spot-B 지원이 누락되어 이기종 확장이 구동되지 못하고 있었습니다.
+* **해결 및 패치 내용:**
+  - [head/cluster_manager.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/cluster_manager.py)의 `scale_out_worker()` 함수 내에 **Spot-B (0.5 Core, 512MB RAM, 시작 포트 50070)** 사양을 추가하였습니다.
+  - 스케일아웃 시 `spot_a`는 `worker-2` 계열, `spot_b`는 `worker-3` 계열로 컨테이너 접두어를 분기하여 부팅 시 좀비 클린업 로직과 정합성을 맞추었습니다.
+  - Spot-B 워커를 백그라운드 Eviction Daemon(강제 스팟 회수) 및 OutOfCapacity 모사 로직에 완벽히 연동하였습니다.
+
+### 3. [자원가드/확장성] 호스트 물리 메모리 가드(Safety Guard) 상향 및 스케일 상한선 상향
+* **해결 및 패치 내용:**
+  - 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`3.0 GB`**로 상향하고, PC의 급격한 과부하(Swap 지연 및 VM 다운)를 사전에 차단하기 위한 설명 주석을 보강하였습니다.
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **5대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+
+### 4. [인프라 제어/격리] PyTorch 물리 GPU VRAM 할당 격리 제한 (VRAM Guard) 구현
+* **발생 현상 & 배경:**
+  - 기존에는 GPU 이기종 성능의 편차를 모사하기 위해 연산 후 인위적인 시간 지연(`sleep`)만 가하였을 뿐, 물리적으로 GPU 하드웨어 자원을 제어할 수 없는 한계가 있었습니다.
+* **해결 및 패치 내용:**
+  - [worker/gpu_simulator.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/worker/gpu_simulator.py) 내부 `PyTorchTaskRunner.run()` 연산 개시부 직후에 `torch.cuda.set_per_process_memory_fraction` API를 사용해 각 워커가 물리적으로 접근할 수 있는 CUDA 메모리 한도를 강제 지정하였습니다.
+  - **노드 등급별 VRAM 격리 제한:** On-Demand(4.0 GB), Spot-A(2.0 GB), Spot-B(1.0 GB). 지정량 초과 점유 시 CUDA OOM 예외 발생을 유도하여 하드웨어 자원 격리 가드를 완성했습니다.
+
+---
+
 ## 📅 2026-06-27 패치 내역
 
 ### 1. [오토스케일링/일관성] 초기 스케일 변수와 docker-compose 실기동 대수 간 정합성 에러 패치

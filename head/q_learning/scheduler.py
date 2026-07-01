@@ -43,14 +43,19 @@ def run_qlearning_scheduler_step(MAX_SPOT_SCALE, empty_queue_duration, agent, ru
         if q_len_real == 0:
             break
             
-        q_len = min(q_len_real, 10)
+        with gcs_state.queue_lock:
+            cnn_count = sum(1 for t in gcs_state.task_queue if t.get("model_type") == "CNN")
+            lstm_rnn_count = sum(1 for t in gcs_state.task_queue if t.get("model_type") in ["LSTM", "RNN"])
+        t_profile = 0 if cnn_count > lstm_rnn_count else 1
+
         with gcs_state.registry_lock:
-            w1_act = 1 if any(info["node_type"] == "on_demand" for info in gcs_state.worker_registry.values()) else 0
-            w2_act = 1 if any(info["node_type"] == "spot_a" for info in gcs_state.worker_registry.values()) else 0
-            active_bitmap = (w1_act * 1) + (w2_act * 2)
+            w1_idle = 1 if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" for info in gcs_state.worker_registry.values()) else 0
+            w2_idle = 1 if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" for info in gcs_state.worker_registry.values()) else 0
+        w_active = (w1_idle * 1) + (w2_idle * 2)
             
+        p_spot = 1 if (time.time() % 30.0) < 10.0 else 0
         budget_level = 0 if gcs_state.virtual_budget < 20.0 else (1 if gcs_state.virtual_budget < 70.0 else 2)
-        state = (q_len, active_bitmap, budget_level)
+        state = (t_profile, w_active, p_spot, budget_level)
 
         # 가용 액션 설정
         available_actions = [2]  # HOLD

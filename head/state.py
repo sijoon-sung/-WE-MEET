@@ -25,11 +25,15 @@ completed_tasks_cache = {}
 """dict: 완료된 태스크 ID별 결과물 캐시 여부 (True/False) 관리 레포지토리."""
 
 # 전역 가상 자산 관리 변수
-virtual_budget = 100.0  # 초기 예산 $100.0달러
+virtual_budget = 1.0  # 초기 예산 $1.0달러 (현실적인 AWS 요율과 밸런싱을 맞추기 위해 1.0달러로 조정)
 """float: 현재 사용 가능한 가상 잔여 예산 ($)."""
 
 task_counter = 0        # 고유한 TASK ID 생성을 위한 카운터 변수
 """int: 고유 태스크 식별 번호 발급을 위한 전역 카운터."""
+
+# 스케줄러 구동 모드
+SCHEDULER_MODE = "dynamic"
+"""str: 현재 활성화된 스케줄러 구동 모드 ("static", "dynamic", "q_learning")."""
 
 # Docker SDK 클라이언트 공통 객체
 DOCKER_CLIENT = None # Docker API 서버와 통신, 컨테이너 관리
@@ -42,3 +46,4 @@ try:
 except Exception as e:
     DOCKER_CLIENT = None
     print(f"[Docker SDK 경고] 도커 데몬 연결 실패 (예외 안전 모드 가동): {e}")
+

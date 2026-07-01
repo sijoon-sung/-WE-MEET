@@ -10,16 +10,16 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from proto import babyray_pb2
 from proto import babyray_pb2_grpc
-from q_learning import QLearningAgent
+from head.q_learning.agent import QLearningAgent
 
 # state 모듈을 gcs_state라는 별칭으로 임포트하여 로컬 변수 state와 충돌하지 않게 함
-import state as gcs_state # gcs state (변수, 인메모리 캐시 모음), q-learning state와의 차별을 두기 위해서
-import cluster_manager
-import dashboard
+import head.state as gcs_state # gcs state (변수, 인메모리 캐시 모음), q-learning state와의 차별을 두기 위해서
+import head.cluster_manager as cluster_manager
+import head.dashboard.server as dashboard
 
-from head.scheduler_static import run_static_scheduler_step
-from head.scheduler_dynamic import run_dynamic_scheduler_step
-from head.scheduler_qlearning import run_qlearning_scheduler_step
+from head.scheduler.static import run_static_scheduler_step
+from head.scheduler.dynamic import run_dynamic_scheduler_step
+from head.q_learning.scheduler import run_qlearning_scheduler_step
 
 # Q-Learning 에이전트
 # cost.yaml의 경로를 찾음 (head에서 ../common/cost_model.yaml -> 부모 디렉토리 common 폴더의 cost_model.yaml)
@@ -36,7 +36,7 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         worker_id (str): 작업을 배정할 대상 워커 식별자 ID.
         worker_info (dict): 대상 워커의 GCS IP/포트/타입 등의 정보 딕셔너리.
         task (dict): 실행할 태스크 정보 (task_id, model_type, epochs, deadline 등).
-        state (tuple): 스케줄링 당시의 환경 상태 (q_len, active_bitmap, budget_level).
+        state (tuple): 스케줄링 당시의 환경 상태 (t_profile, w_active, p_spot, budget_level).
         action (int): 스케줄러가 결정했던 행동 ID.
     """
     # worker_registry -> worker_info를 뽑아서 줌
@@ -65,12 +65,17 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         # 내 PC에 있는 함수처럼 쉽게 호출할 수 있게 해주는 '리모컨(Stub)' 객체를 생성
         stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
         
-        # 1. 작업 개시 전송
+        # 1. 작업 개시 전송 (체크포인트/FedAvg 결합 매핑 확장)
         start_time = time.time()
+        dataset_path = task.get("dataset_path", f"data/{model_type.lower()}_dataset.pt")
+        if model_type.upper() == "REDUCE":
+            job_id = task.get("job_id", "")
+            dataset_path = f"merge:data/final_{job_id}-map-1.pt,data/final_{job_id}-map-2.pt,data/final_{job_id}-map-3.pt"
+            
         result = stub.AssignTask(babyray_pb2.TaskAssignment(
             task_id=task_id,
             model_type=model_type,
-            dataset_path=f"data/{model_type.lower()}_dataset.pt",
+            dataset_path=dataset_path,
             epochs=epochs
         ))
         
@@ -141,7 +146,7 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                 w2_act = 1 if any(info["node_type"] == "spot_a" for info in gcs_state.worker_registry.values()) else 0
                 active_bitmap_next = (w1_act * 1) + (w2_act * 2)
                 
-            budget_level_next = 0 if gcs_state.virtual_budget < 20.0 else (1 if gcs_state.virtual_budget < 70.0 else 2)
+            budget_level_next = 0 if gcs_state.virtual_budget < 0.2 else (1 if gcs_state.virtual_budget < 0.7 else 2)
             next_state = (q_len_next, active_bitmap_next, budget_level_next)
             
             # Bellman Equation에 입각해 Q-Value 업데이트
@@ -153,9 +158,25 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         else:
             dashboard.log_event(f"[Resource Spend] [Mode: {gcs_state.SCHEDULER_MODE}] 비용 차감: ${task_cost:.4f} | 잔여 예산: ${gcs_state.virtual_budget:.4f}")
         
-        # 만약 실패했다면 Task Lineage 자가 복구를 위해 큐 최전방에 작업을 재삽입
+        # 만약 실패했다면 Task Lineage 자가 복구를 위해 복구 태스크(가중치 상속) 큐 재삽입
         if not success:
-            dashboard.log_event(f"[장애 복구] 작업 {task_id} 장애 유실 감지 -> 복구를 위해 대기 큐 재할당.")
+            last_epoch = 0
+            checkpoint_file = None
+            for ep in range(epochs, 0, -1):
+                chk_path = f"data/checkpoint_{task_id}_epoch_{ep}.pt"
+                if os.path.exists(chk_path):
+                    last_epoch = ep
+                    checkpoint_file = chk_path
+                    break
+            
+            if last_epoch > 0 and last_epoch < epochs:
+                remaining_epochs = epochs - last_epoch
+                dashboard.log_event(f"[장애 복구] 작업 {task_id} 중단 감지 -> {last_epoch} Epoch 가중치를 기반으로 이어서 학습 복구(남은 {remaining_epochs} Epochs) 대기 큐 재할당.")
+                task["dataset_path"] = checkpoint_file
+                task["epochs"] = remaining_epochs
+            else:
+                dashboard.log_event(f"[장애 복구] 작업 {task_id} 장애 유실 감지 -> 복구를 위해 대기 큐 재할당 (처음부터 재학습).")
+                
             with gcs_state.queue_lock:
                 gcs_state.task_queue.insert(0, task)
 

@@ -36,7 +36,7 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         worker_id (str): 작업을 배정할 대상 워커 식별자 ID.
         worker_info (dict): 대상 워커의 GCS IP/포트/타입 등의 정보 딕셔너리.
         task (dict): 실행할 태스크 정보 (task_id, model_type, epochs, deadline 등).
-        state (tuple): 스케줄링 당시의 환경 상태 (q_len, active_bitmap, budget_level).
+        state (tuple): 스케줄링 당시의 환경 상태 (t_profile, w_active, p_spot, budget_level).
         action (int): 스케줄러가 결정했던 행동 ID.
     """
     # worker_registry -> worker_info를 뽑아서 줌
@@ -65,12 +65,17 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         # 내 PC에 있는 함수처럼 쉽게 호출할 수 있게 해주는 '리모컨(Stub)' 객체를 생성
         stub = babyray_pb2_grpc.BabyRayServiceStub(channel)
         
-        # 1. 작업 개시 전송
+        # 1. 작업 개시 전송 (체크포인트/FedAvg 결합 매핑 확장)
         start_time = time.time()
+        dataset_path = task.get("dataset_path", f"data/{model_type.lower()}_dataset.pt")
+        if model_type.upper() == "REDUCE":
+            job_id = task.get("job_id", "")
+            dataset_path = f"merge:data/final_{job_id}-map-1.pt,data/final_{job_id}-map-2.pt,data/final_{job_id}-map-3.pt"
+            
         result = stub.AssignTask(babyray_pb2.TaskAssignment(
             task_id=task_id,
             model_type=model_type,
-            dataset_path=f"data/{model_type.lower()}_dataset.pt",
+            dataset_path=dataset_path,
             epochs=epochs
         ))
         
@@ -134,15 +139,18 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
             
             # 큐 상태 갱신 후 다음 상태 추출
             with gcs_state.queue_lock:
-                q_len_next = min(len(gcs_state.task_queue), 10)
+                cnn_count = sum(1 for t in gcs_state.task_queue if t.get("model_type") == "CNN")
+                lstm_rnn_count = sum(1 for t in gcs_state.task_queue if t.get("model_type") in ["LSTM", "RNN"])
+            t_profile_next = 0 if cnn_count > lstm_rnn_count else 1
                 
             with gcs_state.registry_lock:
-                w1_act = 1 if any(info["node_type"] == "on_demand" for info in gcs_state.worker_registry.values()) else 0
-                w2_act = 1 if any(info["node_type"] == "spot_a" for info in gcs_state.worker_registry.values()) else 0
-                active_bitmap_next = (w1_act * 1) + (w2_act * 2)
+                w1_idle = 1 if any(info["node_type"] == "on_demand" and info["status"] == "IDLE" for info in gcs_state.worker_registry.values()) else 0
+                w2_idle = 1 if any(info["node_type"] == "spot_a" and info["status"] == "IDLE" for info in gcs_state.worker_registry.values()) else 0
+            w_active_next = (w1_idle * 1) + (w2_idle * 2)
                 
-            budget_level_next = 0 if gcs_state.virtual_budget < 20.0 else (1 if gcs_state.virtual_budget < 70.0 else 2)
-            next_state = (q_len_next, active_bitmap_next, budget_level_next)
+            p_spot_next = 1 if (time.time() % 30.0) < 10.0 else 0
+            budget_level_next = 0 if gcs_state.virtual_budget < 0.2 else (1 if gcs_state.virtual_budget < 0.7 else 2)
+            next_state = (t_profile_next, w_active_next, p_spot_next, budget_level_next)
             
             # Bellman Equation에 입각해 Q-Value 업데이트
             agent.update_q_value(state, action, reward, next_state)
@@ -153,9 +161,25 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         else:
             dashboard.log_event(f"[Resource Spend] [Mode: {gcs_state.SCHEDULER_MODE}] 비용 차감: ${task_cost:.4f} | 잔여 예산: ${gcs_state.virtual_budget:.4f}")
         
-        # 만약 실패했다면 Task Lineage 자가 복구를 위해 큐 최전방에 작업을 재삽입
+        # 만약 실패했다면 Task Lineage 자가 복구를 위해 복구 태스크(가중치 상속) 큐 재삽입
         if not success:
-            dashboard.log_event(f"[장애 복구] 작업 {task_id} 장애 유실 감지 -> 복구를 위해 대기 큐 재할당.")
+            last_epoch = 0
+            checkpoint_file = None
+            for ep in range(epochs, 0, -1):
+                chk_path = f"data/checkpoint_{task_id}_epoch_{ep}.pt"
+                if os.path.exists(chk_path):
+                    last_epoch = ep
+                    checkpoint_file = chk_path
+                    break
+            
+            if last_epoch > 0 and last_epoch < epochs:
+                remaining_epochs = epochs - last_epoch
+                dashboard.log_event(f"[장애 복구] 작업 {task_id} 중단 감지 -> {last_epoch} Epoch 가중치를 기반으로 이어서 학습 복구(남은 {remaining_epochs} Epochs) 대기 큐 재할당.")
+                task["dataset_path"] = checkpoint_file
+                task["epochs"] = remaining_epochs
+            else:
+                dashboard.log_event(f"[장애 복구] 작업 {task_id} 장애 유실 감지 -> 복구를 위해 대기 큐 재할당 (처음부터 재학습).")
+                
             with gcs_state.queue_lock:
                 gcs_state.task_queue.insert(0, task)
 
@@ -192,8 +216,8 @@ def scheduler_loop():
     
     model_types = ["CNN", "RNN", "LSTM"]
     
-    # 최대 동적 워커 스케일 상한선 (Spot-A 단일 타입 최대 3대 제한 - 호스트 OOM 방지를 위해 30대에서 3대로 축소 조정)
-    MAX_SPOT_SCALE = 3
+    # 최대 동적 워커 스케일 상한선 (Spot-A/B 혼합 최대 5대 제한)
+    MAX_SPOT_SCALE = 5
     
     # 초기 컨테이너 대수 세팅 (Compose 기본 스펙 기준)
     # docker-compose.yml에서 spot 워커(worker-2, 3)는 주석 처리되어 있으므로 초기 기동 대수는 0대입니다.

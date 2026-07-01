@@ -12,7 +12,7 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # GCS 상태 및 Q-Learning 에이전트 가져오기
-from head.q_learning import QLearningAgent
+from head.q_learning.agent import QLearningAgent
 
 class SimulatedCluster:
     """

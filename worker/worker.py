@@ -69,7 +69,8 @@ class BabyRayWorkerServicer(babyray_pb2_grpc.BabyRayServiceServicer):
                 task_id=request.task_id,
                 model_type=request.model_type,
                 epochs=request.epochs,
-                worker_type=self.worker_type
+                worker_type=self.worker_type,
+                dataset_path=request.dataset_path
             )
             
             # 3. 백그라운드 실행: 새로운 스레드를 만들어 runner.run 함수를 백그라운드에서 실행시킵니다.

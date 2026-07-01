@@ -4,8 +4,8 @@ import subprocess #docker sdk를 import하기 위해
 import docker #docker SDK
 
 # 공유 상태 및 대시보드 모듈 임포트
-import state
-import dashboard
+import head.state as state # state = 시스템의 전역 변수를 가지고 있음
+import head.dashboard.server as dashboard
 
 def get_gpu_free_memory():
     """
@@ -35,59 +35,77 @@ def cleanup_zombie_containers():
     Head 노드 기동 시, 호스트에 남겨진 이전 라이프사이클의 
     동적 Spot 워커 컨테이너(babyray-worker-2-*, babyray-worker-3-*)들을 일괄 정리하여 자원을 회수합니다.
     """
+    # Docker Client가 연결이 안되어 있다면 실행하지 않음
     if state.DOCKER_CLIENT is None:
-        print("[Docker SDK] 도커 데몬 미연결로 잔존 컨테이너 정리 작업을 스킵합니다.")
+        dashboard.log_event("[Docker SDK] 도커 데몬 미연결로 잔존 컨테이너 정리 작업을 스킵합니다.")
         return
         
-    print("[Docker SDK] 기존 잔존 동적 컨테이너 청소 작업을 시작합니다...")
+    dashboard.log_event("[Docker SDK] 기존 잔존 동적 컨테이너 청소 작업을 시작합니다...")
     try:
-        containers = state.DOCKER_CLIENT.containers.list(all=True) #list를 받아서 SDK로부터
+        # Docker SDK에서 list()로 모든 컨테이너 목록을 리스트 객체
+        containers = state.DOCKER_CLIENT.containers.list(all=True)
         cleaned_count = 0 # 몇개를 제거했는지 기록
         for container in containers:
             c_name = container.name
+            # worker-1: on-demand / worker-2: spot-a / worker-3: spot-b
             if c_name.startswith("babyray-worker-2-") or c_name.startswith("babyray-worker-3-"):
-                print(f"[Docker SDK] 잔존 컨테이너 감지 및 정리: {c_name}")
+                dashboard.log_event(f"[Docker SDK] 잔존 컨테이너 감지 및 정리: {c_name}")
+                
                 try:
                     container.stop(timeout=2)
                 except Exception:
                     pass
+
+                # 컨테이너 중지 후 제거
                 try:
                     container.remove(force=True)
-                    cleaned_count += 1
+                    cleaned_count += 1 # 제거 성공 시 카운트 증가
+                
                 except Exception as e:
-                    print(f"[Docker SDK 에러] 컨테이너 {c_name} 제거 실패: {e}")
+                    dashboard.log_event(f"[Docker SDK 에러] 컨테이너 {c_name} 제거 실패: {e}")
+        # for문이 끝나면 로그 출력
         dashboard.log_event(f"[Docker SDK] 총 {cleaned_count}개의 잔존 컨테이너가 정리되었습니다.")
+        
     except Exception as e:
         dashboard.log_event(f"[Docker SDK 에러] 잔존 컨테이너 조회 중 에러 발생: {e}")
 
 
-
+# Scale - out 하기 전에 자원이 충분한지 확인하는 함수 (Safety Guard)
 def is_host_resource_sufficient():
     """
     [Global Host Resource Manager]
     호스트 시스템(Windows 및 WSL2/Docker 환경 포함)의 실시간 물리 메모리 가용량을 점검하여 자원 임계치 안전 여부를 판정합니다.
 
     Returns:
-        bool: WSL2 및 호스트 가용 메모리가 2.0GB 이상인 경우 True, 미만인 경우 False.
+        bool: WSL2 및 호스트 가용 메모리가 3.0GB 이상인 경우 True, 미만인 경우 False.
     """
+    # [Safety Guard 임계값 3.0GB 선정 이유]
+    # RAM 초과 시 컴퓨터 과부하(버벅임 및 VM 다운)를 방지하기 위한 안전장치입니다.
+    # 신규 워커 생성 메모리(1.0GB) + 시스템 최소 생존 버퍼(2.0GB)를 고려해 총 3.0GB로 설정하였습니다.
+    
     # 1. WSL2 내부의 가용 메모리 점검 시도 (Windows 호스트 환경인 경우 subprocess로 wsl 호출)
     try:
+        # 현재 파이썬이 실행 중인 OS가 Windows 계열
         if os.name == 'nt':
             result = subprocess.run(
                 ["wsl", "free", "-b"],
                 capture_output=True, text=True, timeout=3, check=True
             )
+            # wsl free -b(바이트)
+            
+            # 파싱 로직
             lines = result.stdout.strip().splitlines()
             for line in lines:
                 if line.startswith("Mem:"):
                     parts = line.split()
                     if len(parts) >= 7:
                         wsl_available_gb = int(parts[6]) / (1024 ** 3)
-                        if wsl_available_gb < 2.0:
-                            print(f"[Global Resource Guard] WSL2 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 2.0 GB")
+                        if wsl_available_gb < 3.0:
+                            print(f"[Global Resource Guard] WSL2 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 3.0 GB (Safety Guard)")
                             return False
                         print(f"[Global Resource Guard] WSL2 가용 물리 메모리 양호: {wsl_available_gb:.2f} GB")
         else:
+            # OS가 리눅스
             result = subprocess.run(
                 ["free", "-b"],
                 capture_output=True, text=True, timeout=3, check=True
@@ -98,8 +116,8 @@ def is_host_resource_sufficient():
                     parts = line.split()
                     if len(parts) >= 7:
                         wsl_available_gb = int(parts[6]) / (1024 ** 3)
-                        if wsl_available_gb < 2.0:
-                            print(f"[Global Resource Guard] 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 2.0 GB")
+                        if wsl_available_gb < 3.0:
+                            print(f"[Global Resource Guard] 가용 물리 메모리 부족 경고: {wsl_available_gb:.2f} GB < 3.0 GB (Safety Guard)")
                             return False
     except Exception:
         pass
@@ -108,15 +126,15 @@ def is_host_resource_sufficient():
     try:
         mem = psutil.virtual_memory()
         available_gb = mem.available / (1024 ** 3)
-        if available_gb < 2.0:
-            print(f"[Global Resource Guard] 호스트 가용 물리 메모리 부족 경고: {available_gb:.2f} GB < 2.0 GB")
+        if available_gb < 3.0:
+            print(f"[Global Resource Guard] 호스트 가용 물리 메모리 부족 경고: {available_gb:.2f} GB < 3.0 GB (Safety Guard)")
             return False
         return True
     except Exception as e:
         print(f"[Global Resource Guard] 자원 점검 중 예외 발생: {e}")
         return True
 
-
+# spot_a,b 등의 worker를 하나 늘리는 scale - out
 def scale_out_worker(node_type):
     """
     [Docker SDK Container Run API]
@@ -133,12 +151,23 @@ def scale_out_worker(node_type):
         print("[Docker SDK] 도커 데몬과 연결되어 있지 않아 동적 스케일아웃을 스킵합니다.")
         return False
 
+    # 0. 공급 부족(OutOfCapacity / Provisioning 거절) 30% 확률 모사
+    # 스팟 인스턴스 공급 부족 장애(OutOfCapacity) 현상을 소프트웨어적으로 시뮬레이션 (spot_a 및 spot_b 적용)
+    if node_type in ["spot_a", "spot_b"] and random.random() < 0.3:
+        dashboard.log_event(f"[Docker SDK] OutOfCapacity 감지: Spot-{node_type[-1].upper()} 자원 공급 부족으로 인해 노드 증설이 거절되었습니다.")
+        return False
+
     try:
         spec = {
             "spot_a": {
                 "nano_cpus": 1000000000, # 1.0 Core
                 "mem_limit": "1024m",
                 "port": 50060
+            },
+            "spot_b": {
+                "nano_cpus": 500000000,  # 0.5 Core
+                "mem_limit": "512m",
+                "port": 50070            # Spot-B 전용 시작 포트 대역
             }
         }
 
@@ -148,7 +177,7 @@ def scale_out_worker(node_type):
 
         node_spec = spec[node_type]
 
-        # 1. 호스트 자원 가드
+        # 1. 호스트 자원 가드 -> 아까 만들었던 함수 safett guard
         if not is_host_resource_sufficient():
             print("[Docker SDK] 호스트 물리 메모리 부족으로 스케일아웃 기동을 안전하게 거부합니다.")
             return False
@@ -158,7 +187,7 @@ def scale_out_worker(node_type):
             print(f"[Global Resource Guard] 가용 GPU VRAM 부족 ({free_vram} MiB < 500 MiB). 스케일아웃을 보류합니다.")
             return False
 
-        # 2. 네트워크 자동 감지
+        # 2. 네트워크 자동 감지 - gRPC 통신을 위해서 head/worker가 같은 네트워크에 묶여야 함
         network_name = "babyray-net"
         try:
             head_container = state.DOCKER_CLIENT.containers.get("babyray-head")
@@ -177,8 +206,10 @@ def scale_out_worker(node_type):
         while candidate_port in existing_ports:
             candidate_port += 1
 
-        # 4. 고유 ID 및 컨테이너명 생성 (비어있는 가장 작은 순차 번호 탐색 및 재사용)
-        base_id = "worker-2"
+        # 4. 고유 ID 및 컨테이너명 생성 (Index Recycling 메커니즘 적용)
+        # - 정상 흐름: 스케일 인 시 컨테이너가 삭제되면 빈자리(Gap) 번호를 1번부터 찾아 재활용합니다.
+        # - 예외 방어: GCS와 Docker 호스트 실존 컨테이너명을 교차 확인하여 이름 중복 충돌을 방지합니다.
+        base_id = "worker-2" if node_type == "spot_a" else "worker-3"
         
         with state.registry_lock:
             # GCS 레지스트리에 등록된 순차 인덱스 추출
@@ -260,7 +291,7 @@ def scale_out_worker(node_type):
         dashboard.log_event(f"[Docker SDK 에러] 동적 스케일아웃 실행 실패: {e}")
         return False
 
-
+# FIFO, LIFO가 아닌 메모리 사용량이 높은 순으로 정렬해 끄도록 설계 -> 생존성을 극대화
 def scale_in_specific_worker(node_type):
     """
     [Docker SDK Container Stop/Remove API]
@@ -287,6 +318,7 @@ def scale_in_specific_worker(node_type):
             ]
             if idle_workers:
                 # 메모리 사용률이 높은 순(오버로드 상태)으로 정렬하여 1순위로 회수
+                # 메모리(mem) 소모율이 가장 높은 녀석이 가장 오도록 정렬
                 idle_workers.sort(key=lambda x: x[1].get("mem", 0.0), reverse=True)
                 target_worker_id = idle_workers[0][0]
 
@@ -300,6 +332,7 @@ def scale_in_specific_worker(node_type):
         # 1. Docker SDK를 통한 컨테이너 중지 및 제거
         try:
             container = state.DOCKER_CLIENT.containers.get(container_ref)
+            # 도커 SDK로 타겟 컨테이너 핸들러를 가져와 5초 유예 정지 -> 제거
             dashboard.log_event(f"[Docker SDK] IDLE 컨테이너 회수 시작: {target_worker_id} (컨테이너 ID: {container_ref})")
             container.stop(timeout=5)
             container.remove()
@@ -307,7 +340,7 @@ def scale_in_specific_worker(node_type):
         except Exception as e:
             dashboard.log_event(f"[Docker SDK 경고] 컨테이너 직접 조작 실패 ({e}), GCS 레지스트리만 소거 처리 진행.")
 
-        # 2. GCS 레지스트리에서 제거
+        # 2. GCS 레지스트리에서 제거 - Docker 컨테이너 제거 후 dict(인메모리 캐시)에서 제거
         with state.registry_lock:
             if target_worker_id in state.worker_registry:
                 del state.worker_registry[target_worker_id]
@@ -335,13 +368,15 @@ def get_container_metrics(container_name):
         
     try:
         container = state.DOCKER_CLIENT.containers.get(container_name)
+        # 호출한 딱 그 한 순간의 도커 시스템 메트릭 원시(Raw) 정보 수집
         stats = container.stats(stream=False)
         
         # CPU 계산
+        # 도커 컨테이너의 CPU 퍼센티지를 구하는 리눅스 표준 공식
         cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
         system_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
         
-        # cGroup CPU cores 수 계산
+        # cGroup CPU cores 수 계산 - 멀티코어 환경을 반영하기 위해 활성화된 CPU 코어 수
         online_cpus = stats['cpu_stats'].get('online_cpus', 1)
         
         cpu_percent = 0.0
@@ -357,3 +392,48 @@ def get_container_metrics(container_name):
 
     except Exception:
         return 0.0, 0.0
+
+def start_spot_eviction_loop():
+    """
+    [Spot Eviction Daemon Thread]
+    백그라운드에서 실시간 요금제 위험도 P_spot 수준에 맞춰 주기적으로 
+    기동 중인 Spot 워커 컨테이너를 강제 정지 및 제거하여 Eviction 장애를 유도합니다.
+    """
+    def eviction_loop():
+        dashboard.log_event("=== [Eviction Daemon] 실시간 스팟 강제 회수 모니터링 데몬 기동 ===")
+        while True:
+            time.sleep(6.0)  # 6초 주기로 중단 여부 심사
+            
+            p_spot = 1 if (time.time() % 30.0) < 10.0 else 0
+            eviction_prob = 0.15 if p_spot == 1 else 0.05
+            
+            spot_workers = []
+            with state.registry_lock:
+                for wid, info in state.worker_registry.items():
+                    if info["node_type"] in ["spot_a", "spot_b"]:
+                        spot_workers.append(wid)
+            
+            if not spot_workers:
+                continue
+                
+            for wid in spot_workers:
+                if random.random() < eviction_prob:
+                    container_ref = f"babyray-{wid}"
+                    dashboard.log_event(f"[Eviction Daemon] !!! 스팟 강제 회수(Eviction) 발생 !!! -> 대상: {wid} (확률: {eviction_prob*100:.1f}%)")
+                    
+                    # 1. GCS 레지스트리에서 즉시 격리 삭제
+                    with state.registry_lock:
+                        if wid in state.worker_registry:
+                            del state.worker_registry[wid]
+                            
+                    # 2. 물리 컨테이너 강제 소거 (stop & remove)
+                    try:
+                        if state.DOCKER_CLIENT is not None:
+                            container = state.DOCKER_CLIENT.containers.get(container_ref)
+                            container.stop(timeout=1)
+                            container.remove(force=True)
+                            dashboard.log_event(f"[Eviction Daemon] 컨테이너 강제 회수 완료: {container_ref}")
+                    except Exception as e:
+                        dashboard.log_event(f"[Eviction Daemon 오류] 컨테이너 소거 중 실패: {e}")
+
+    threading.Thread(target=eviction_loop, daemon=True).start()

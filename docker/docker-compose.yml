@@ -17,7 +17,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # 호스트 Docker 데몬 연동
     ports:
       - "50051:50051" # gRPC 포트
-      - "8080:8080"   # 모니터링 대시보드 포트 추가
+      - "8080:8080" # 모니터링 대시보드 포트 추가
     networks:
       - babyray-net
     environment:
@@ -59,9 +59,12 @@ services:
       - HEAD_PORT=50051
       - PYTHONUNBUFFERED=1
 
+# 도커 컨테이너를 실행(Run)하는 시점에 cluster_manager.py가 인자값과 
+# 환경 변수로 각각 다르게 주입하여 완벽하게 제어합니다.
+#
 #  # Spot-A 노드 (1 Core, 1GB Memory, GPU 0.6 배율)
 #  worker-2:
-#    image: babyray-image:latest
+#    image: babyray-worker-image:latest
 #    container_name: babyray-worker-2
 #    depends_on:
 #      - head
@@ -86,7 +89,7 @@ services:
 #
 #  # Spot-B 노드 (0.5 Core, 512MB Memory, GPU 0.3 배율)
 #  worker-3:
-#    image: babyray-image:latest
+#    image: babyray-worker-image:latest
 #    container_name: babyray-worker-3
 #    depends_on:
 #      - head
@@ -108,4 +111,3 @@ services:
 #      - HEAD_HOST=head
 #      - HEAD_PORT=50051
 #      - PYTHONUNBUFFERED=1
-

@@ -48,15 +48,40 @@ def check_and_cleanup_dead_workers():
     """GCS 레지스트리와 Docker 호스트 상의 DEAD 워커 노드를 감시하고 강제 제거(회수)합니다."""
     current_time = time.time()
     dead_workers = []
+    recovered_tasks = []
     with gcs_state.registry_lock:
         for wid, info in list(gcs_state.worker_registry.items()):
+            if wid == "worker-1" or info.get("node_type") == "on_demand":
+                continue
             if current_time - info["last_heartbeat"] > 15.0:
                 dead_workers.append(wid)
         for wid in dead_workers:
             dashboard.log_event(f"[Scheduler GCS] [DEAD 노드 감지] {wid} 노드가 오프라인 처리되었습니다.")
             del gcs_state.worker_registry[wid]
+            
+            # GCS Task Lineage DAG 조회 및 의존 유실 태스크 구조
+            for sub_task_id, lineage_info in list(gcs_state.task_lineage.items()):
+                if lineage_info["worker_id"] == wid and lineage_info["status"] == "RUNNING":
+                    lineage_info["status"] = "FAILED"
+                    recovered_tasks.append({
+                        "task_id": sub_task_id,
+                        "model_type": lineage_info["model_type"],
+                        "epochs": lineage_info["epochs"],
+                        "deadline": time.time() + 45.0,
+                        "enqueue_time": time.time(),
+                        "dataset_path": lineage_info["dataset_path"],
+                        "is_recovered_subtask": True
+                    })
+
+    if recovered_tasks:
+        with gcs_state.queue_lock:
+            for task in recovered_tasks:
+                gcs_state.task_queue.insert(0, task)
+                dashboard.log_event(f"[Lineage Recovery] !!! Cascaded Recovery 작동 !!! DEAD 워커에서 유실된 subtask '{task['task_id']}'를 대기열 0순위로 복구했습니다!")
 
     for wid in dead_workers:
+        if wid == "worker-1":
+            continue
         if wid.startswith("worker-2-") or wid.startswith("worker-3-"):
             container_ref = f"babyray-{wid}"
             try:
@@ -104,8 +129,8 @@ def scheduler_loop():
     
     model_types = ["CNN", "RNN", "LSTM"]
     
-    # 최대 동적 워커 스케일 상한선 (Spot-A/B 혼합 최대 10대 제한)
-    MAX_SPOT_SCALE = 10
+    # 최대 동적 워커 스케일 상한선 (Spot-A/B 혼합 최대 7대 제한)
+    MAX_SPOT_SCALE = 7
     
     # 초기 컨테이너 대수 세팅 (Compose 기본 스펙 기준)
     # docker-compose.yml에서 spot 워커(worker-2, 3)는 주석 처리되어 있으므로 초기 기동 대수는 0대입니다.

@@ -20,7 +20,58 @@
 * **해결 및 패치 내용:**
   - 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`4.0 GB`**로 상향하고, PC의 급격한 과부하(Swap 지연 및 VM 다운)를 사전에 차단하기 위한 해결 방법 로그를 출력하도록 개선했습니다.
   - `$env:BYPASS_RESOURCE_GUARD="1"` 환경 변수 입력 시 가용 램 점검 가드를 즉시 우회(Bypass)할 수 있는 가드 우회 옵션을 신설하여 로컬 개발 테스트 편의성을 대폭 보강했습니다.
-  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **10대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **7대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+
+### 4. [인프라 제어/격리] PyTorch 물리 GPU VRAM 할당 격리 제한 (VRAM Guard) 구현
+* **해결 및 패치 내용:**
+  - [worker/gpu_simulator.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/worker/gpu_simulator.py) 내부 `PyTorchTaskRunner.run()` 연산 개시부 직후에 `torch.cuda.set_per_process_memory_fraction` API를 사용해 각 워커가 물리적으로 접근할 수 있는 CUDA 메모리 한도를 강제 지정하였습니다.
+  - **노드 등급별 VRAM 격리 제한:** On-Demand(4.0 GB), Spot-A(2.0 GB), Spot-B(1.0 GB). 지정량 초과 점유 시 CUDA OOM 예외 발생을 유도하여 하드웨어 자원 격리 가드를 완성했습니다.
+
+### 5. [긴급 버그 패치] 빌드 오류, 데이터셋 404 및 맵-리듀스 데드락 해결
+* **NameError & ImportError 해결:** `cluster_manager.py` 내의 누락되었던 필수 표준 라이브러리(`time`, `random`, `threading`)를 바인딩하고, `gpu_simulator.py` 내 지워진 레거시 모듈에 대한 임포트 참조를 제거하여 워커/헤드 크래시를 완벽 해결했습니다.
+* **MNIST 외부 404 차단 바이패스:** 외부 AWS S3 만료로 인한 torchvision 다운로드 404 실패 이슈를 해결하기 위해, 코드 내부에서 0~9 손글씨 이미지를 직접 다차원 텐서로 주입하는 **`get_inline_mnist_dataset()` 인라인 가상 데이터셋**을 구축했습니다.
+* **Map-Reduce 데이터 볼륨 마운트 및 핀닝:** 격리된 컨테이너 간 가중치 전송용 도커 볼륨 마운트를 구성하고, 스팟 탈퇴로 인한 회수 방지를 위해 병합(Reduce) 연산을 `on_demand` 노드로 고정(Pinning)했습니다.
+* **스케줄러 데드락 해결:** 맵 작업 분산 시 온디맨드 노드가 메인 스레드 락에 걸려 `IDLE`로 풀리지 못하던 순환 대기 데드락을 맵-리듀스 진입 시 락을 해제하도록 보강하여 완치했습니다.
+
+### 6. [네트워크/셧다운] Graceful Shutdown 및 좀비 스팟 컨테이너 완전 소거
+* **시그널 리스너 기반 자동 제거:** `Ctrl+C` 또는 `docker-compose down` 시 헤드 프로세스가 `SIGINT/SIGTERM` 시그널을 감지하여 구동 중이던 모든 동적 스팟 워커들을 도커 SDK로 즉시 동기 정리 소거하는 셧다운 핸들러를 장착했습니다.
+* **외부 브릿지 네트워크 전환:** 컨테이너 정리 지연으로 네트워크 해제가 실패하던 문제를 `babyray-net` 을 external 네트워크로 매핑하여 영구 해결했습니다.
+
+### 7. [GUI/대시보드] 파일 독립화 및 프리미엄 라이브 스케일 애니메이션 구축
+* **프론트엔드 Decoupling:** `server.py` 내 하드코딩된 HTML/CSS/JS 코드를 독립 정적 웹 리소스로 완전히 물리 분리했습니다.
+* **학습/SLA 지표 배너 추가:** 대시보드 상단에 스케줄러 모드, 완료/실패 수, 강화학습 탐험율(Epsilon) 실시간 현황판을 추가했습니다.
+* **이원화 풀 및 스케일 애니메이션:** 온디맨드와 스팟 노드 풀을 레이아웃으로 분리하고, 노드 가입/탈퇴 시 부드러운 스케일인/아웃 페이드 트랜지션 애니메이션 효과를 구현했습니다.
+
+### 8. [고가용성] Task Lineage DAG 자가 복구 (Cascaded Recovery) 구현
+* **의존성 계보 스냅샷:** `state.py` 에 `task_lineage = {}` 공유 딕셔너리를 신설하여 서브맵 태스크들의 부모 관계, 실행 담당 워커 ID, 훈련 파라미터 및 런타임 상태를 실시간 관리합니다.
+* **장애 자동 구조:** `core.py` 가 DEAD 워커 감출 즉시 유실된 작업을 큐 맨 앞으로 긴급 복구(`task_queue.insert(0, task)`)하여 대체 워커 노드에서 즉시 재훈련이 이루어지도록 고가용성을 패치했습니다.
+
+### 9. [강화학습] 보상 함수 리셰이핑을 통한 Co-scheduling 자율 학습 구현
+* **자율 융합 배치:** `agent.py` 보상 함수에 `co_scheduled_models` 와 `current_model` 분석을 연동하여, 동일 노드 내에 이종 모형(CNN vs RNN/LSTM)이 융합 배치되면 보상을 가산(+0.15)하고, 자원 경합 유발 시 감산(-0.20)하여 강화학습으로 자율적인 Co-scheduling이 수렴되도록 보완했습니다.
+
+### 10. [클린업/평가] 중간 맵 파일 소거 및 최종 연합 학습 추론/결과 평가 출력 연동
+* **공간 누수 소거:** `utils.py`에서 Reduce 병합 완료 시점에 결합 재료였던 임시 맵 가중치 파일들(`.pt`)을 즉각 삭제(`os.remove`)하도록 조치하여 WSL2 공간 누수를 완벽 차단했습니다.
+* **추론 성과 평가 리포팅:** 병합 성공 직후 온디맨드 노드가 최종 모델로 추론을 수행해낸 결과(`stat.logs`)를 마스터 대시보드 및 콘솔에 스트림 중계하도록 연동했습니다.
+
+---
+
+## 📅 2026-07-01 패치 내역 (1차 기록 - 롤백용 보존)
+
+### 1. [GCS/안정화] `RegisterWorker` 중복 ID 등록 세션 충돌 방지 로직 신설
+* **해결 및 패치 내용:**
+  - [head/head.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/head.py)의 등록 API 내부에 중복 검증 로직을 추가했습니다. 등록 시점에 `worker_id`가 이미 등록되어 있다면 경고 로그를 남기고 실패 응답(`success=False`)을 보내어 세션 침범을 완벽히 방어하였습니다.
+
+### 2. [인프라/스케일링] 이기종 Spot-B 워커 노드 동적 스케일링 완전 연동
+* **해결 및 패치 내용:**
+  - [head/cluster_manager.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트/WE-MEET/head/cluster_manager.py)의 `scale_out_worker()` 함수 내에 **Spot-B (0.5 Core, 512MB RAM, 시작 포트 50070)** 사양을 추가하였습니다.
+  - 스케일아웃 시 `spot_a`는 `worker-2` 계열, `spot_b`는 `worker-3` 계열로 컨테이너 접두어를 분기하여 부팅 시 좀비 클린업 로직과 정합성을 맞추었습니다.
+  - Spot-B 워커를 백그라운드 Eviction Daemon(강제 스팟 회수) 및 OutOfCapacity 모사 로직에 완벽히 연동하였습니다.
+
+### 3. [자원가드/확장성] 호스트 물리 메모리 가드(Safety Guard) 상향 및 우회 변수 제공
+* **해결 및 패치 내용:**
+  - 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`4.0 GB`**로 상향하고, PC의 급격한 과부하(Swap 지연 및 VM 다운)를 사전에 차단하기 위한 해결 방법 로그를 출력하도록 개선했습니다.
+  - `$env:BYPASS_RESOURCE_GUARD="1"` 환경 변수 입력 시 가용 램 점검 가드를 즉시 우회(Bypass)할 수 있는 가드 우회 옵션을 신설하여 로컬 개발 테스트 편의성을 대폭 보강했습니다.
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **7대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
 
 ### 4. [인프라 제어/격리] PyTorch 물리 GPU VRAM 할당 격리 제한 (VRAM Guard) 구현
 * **해결 및 패치 내용:**
@@ -63,7 +114,7 @@
 ### 3. [자원가드/확장성] 호스트 물리 메모리 가드(Safety Guard) 상향 및 스케일 상한선 상향
 * **해결 및 패치 내용:**
   - 스케일아웃 전 시스템 자원 상태를 검증하는 `is_host_resource_sufficient()`의 가용 메모리 임계 안전선을 기존 `2.0 GB`에서 **`3.0 GB`**로 상향하고, PC의 급격한 과부하(Swap 지연 및 VM 다운)를 사전에 차단하기 위한 설명 주석을 보강하였습니다.
-  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **10대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
+  - [head/scheduler/core.py](file:///c:/Users/win/Desktop/클라우드  WE-MEET 프로젝트\WE-MEET/head/scheduler/core.py)에 정의된 동적 스팟 워커의 최대 가동 대수 제한(`MAX_SPOT_SCALE`)을 기존 3대에서 **7대**로 확장하여 더 다이내믹한 이기종 스케일링이 가능하도록 개선했습니다.
 
 
 ### 4. [인프라 제어/격리] PyTorch 물리 GPU VRAM 할당 격리 제한 (VRAM Guard) 구현

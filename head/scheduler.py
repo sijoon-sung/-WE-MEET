@@ -103,8 +103,8 @@ def scheduler_loop():
     
     model_types = ["CNN", "RNN", "LSTM"]
     
-    # 최대 동적 워커 스케일 상한선 (Spot-A/B 혼합 최대 10대 제한)
-    MAX_SPOT_SCALE = 10
+    # 최대 동적 워커 스케일 상한선 (Spot-A/B 혼합 최대 7대 제한)
+    MAX_SPOT_SCALE = 7
     
     # 초기 컨테이너 대수 세팅 (Compose 기본 스펙 기준)
     # docker-compose.yml에서 spot 워커(worker-2, 3)는 주석 처리되어 있으므로 초기 기동 대수는 0대입니다.

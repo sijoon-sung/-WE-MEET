@@ -131,8 +131,11 @@ class BabyRayHeadServicer(babyray_pb2_grpc.BabyRayServiceServicer):
         Returns:
             HeartbeatResponse: 수신 응답(Ack) 메시지.
         """
-        # 워커 ID를 기반으로 컨테이너 이름 생성 (이름이 )
-        container_name = f"babyray-{request.worker_id}"
+        # 워커 ID를 기반으로 컨테이너 이름 생성 (worker-1은 babyray-on-demand로 매핑)
+        if request.worker_id == "worker-1":
+            container_name = "babyray-on-demand"
+        else:
+            container_name = f"babyray-{request.worker_id}"
 
         # 컨테이너의 실제 CPU 및 메모리 사용량 조회
         real_cpu, real_mem = cluster_manager.get_container_metrics(container_name)

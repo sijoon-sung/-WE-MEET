@@ -43,11 +43,14 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
             ]
             if worker_id in gcs_state.worker_registry:
                 available_idle_workers.append((worker_id, gcs_state.worker_registry[worker_id]))
+            # worker-1 (온디맨드 노드)가 리스트에 있다면 최우선(index 0)으로 오도록 정렬 (병렬 맵 실패 최소화)
+            available_idle_workers.sort(key=lambda x: 0 if x[0] == "worker-1" else 1)
                 
         is_map_reduce = (
             model_type.upper() in ["CNN", "RNN", "LSTM"]
             and epochs >= 8
             and len(available_idle_workers) >= 2
+            and not task.get("is_recovered_subtask", False)
         )
         
         if is_map_reduce:
@@ -68,9 +71,21 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
             
             selected_workers = available_idle_workers[:num_splits]
             with gcs_state.registry_lock:
-                for wid, _ in selected_workers:
+                for sub_idx, (wid, _) in enumerate(selected_workers):
                     if wid in gcs_state.worker_registry:
                         gcs_state.worker_registry[wid]["status"] = "BUSY"
+                        
+                        # Task Lineage DAG 정보 등록 (장애 복구 추적용)
+                        sub_task_id = f"{task_id}-map-{sub_idx}"
+                        sub_ep = sub_epochs + (remainder if sub_idx == 0 else 0)
+                        gcs_state.task_lineage[sub_task_id] = {
+                            "parent": task_id,
+                            "model_type": model_type,
+                            "epochs": sub_ep,
+                            "worker_id": wid,
+                            "status": "RUNNING",
+                            "dataset_path": task.get("dataset_path", "")
+                        }
                         
             def execute_map_subtask(sub_idx, w_id, w_info):
                 sub_task_id = f"{task_id}-map-{sub_idx}"
@@ -107,13 +122,26 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                             stat = sub_stub.GetTaskStatus(babyray_pb2.TaskStatusRequest(task_id=sub_task_id))
                             if stat.status in ["SUCCESS", "COMPLETED"]:
                                 sub_success = True
+                                if stat.logs:
+                                    for line in stat.logs.splitlines():
+                                        if line.strip():
+                                            dashboard.log_event(f"[{w_id}] {line.strip()}")
+                                with gcs_state.registry_lock:
+                                    if sub_task_id in gcs_state.task_lineage:
+                                        gcs_state.task_lineage[sub_task_id]["status"] = "SUCCESS"
                                 break
                             elif stat.status == "FAILED":
                                 sub_success = False
+                                with gcs_state.registry_lock:
+                                    if sub_task_id in gcs_state.task_lineage:
+                                        gcs_state.task_lineage[sub_task_id]["status"] = "FAILED"
                                 break
                 except Exception as ex:
                     dashboard.log_event(f"[Map Task 에러] 서브맵 {sub_task_id} (워커 {w_id}) 실패: {ex}")
                     sub_success = False
+                    with gcs_state.registry_lock:
+                        if sub_task_id in gcs_state.task_lineage:
+                            gcs_state.task_lineage[sub_task_id]["status"] = "FAILED"
                 finally:
                     with gcs_state.registry_lock:
                         if w_id in gcs_state.worker_registry:
@@ -201,6 +229,10 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                                 r_stat = r_stub.GetTaskStatus(babyray_pb2.TaskStatusRequest(task_id=task_id))
                                 if r_stat.status in ["SUCCESS", "COMPLETED"]:
                                     reduce_success = True
+                                    if r_stat.logs:
+                                        for line in r_stat.logs.splitlines():
+                                            if line.strip():
+                                                dashboard.log_event(f"[{reduce_worker_id}] {line.strip()}")
                                     break
                                 elif r_stat.status == "FAILED":
                                     reduce_success = False
@@ -217,6 +249,23 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
                     execution_time = time.time() - start_time
                     if success:
                         dashboard.log_event(f"[Map-Reduce] {task_id} 최종 Map-Reduce FedAvg 병합 성공! (총 시간: {execution_time:.2f}초)")
+                        
+                        # 1. task_lineage 딕셔너리에서 완료된 맵 족보 정리 (메모리 릭 방지)
+                        with gcs_state.registry_lock:
+                            for sub_id in list(gcs_state.task_lineage.keys()):
+                                lineage_info = gcs_state.task_lineage.get(sub_id)
+                                if lineage_info and lineage_info.get("parent") == task_id:
+                                    if sub_id in gcs_state.task_lineage:
+                                        del gcs_state.task_lineage[sub_id]
+                                    
+                        # 2. 중간 맵 가중치 파일 (.pt) 즉각 소거 (WSL2/도커 공간 누수 방지)
+                        for f_path in merge_files:
+                            try:
+                                if os.path.exists(f_path):
+                                    os.remove(f_path)
+                                    dashboard.log_event(f"[Reduce Cleanup] 임시 맵 가중치 파일 소거 완료: {f_path}")
+                            except Exception as cleanup_err:
+                                dashboard.log_event(f"[Reduce Cleanup 경고] 파일 {f_path} 소거 중 오류: {cleanup_err}")
                     else:
                         dashboard.log_event(f"[Map-Reduce] {task_id} Reduce 병합 단계 실패.")
                 else:
@@ -287,12 +336,21 @@ def run_task_on_worker(worker_id, worker_info, task, state, action):
         gcs_state.virtual_budget -= task_cost
         
         if gcs_state.SCHEDULER_MODE == "q_learning" and state is not None and action is not None:
+            # 동시 기동 중이던 이종 모형 분석 (Co-scheduling 평가용)
+            co_scheduled = []
+            with gcs_state.registry_lock:
+                for sub_id, l_info in gcs_state.task_lineage.items():
+                    if l_info.get("worker_id") == worker_id and l_info.get("status") == "RUNNING" and sub_id != task["task_id"]:
+                        co_scheduled.append(l_info.get("model_type", ""))
+                        
             reward = agent.calculate_reward(
                 success=success,
                 execution_time=execution_time,
                 worker_type=worker_type,
                 delay_time=delay_time,
-                deadline_exceeded=deadline_exceeded
+                deadline_exceeded=deadline_exceeded,
+                current_model=model_type,
+                co_scheduled_models=co_scheduled
             )
             
             with gcs_state.queue_lock:

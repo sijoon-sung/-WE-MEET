@@ -41,7 +41,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.worker
     image: babyray-worker-image:latest
-    container_name: babyray-worker-1
+    container_name: babyray-on-demand
     depends_on:
       - head
     command: python -m worker.worker --id worker-1 --type on_demand --port 50052
@@ -50,8 +50,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 2048M
+          cpus: '1.5'
+          memory: 1024M
         reservations:
           devices:
             - driver: nvidia

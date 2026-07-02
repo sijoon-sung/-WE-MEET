@@ -24,6 +24,10 @@ task_status = {}
 completed_tasks_cache = {}
 """dict: 완료된 태스크 ID별 결과물 캐시 여부 (True/False) 관리 레포지토리."""
 
+# Task Lineage DAG 관리 레지스트리 (장애 자가 복구용)
+task_lineage = {}
+"""dict: 태스크 의존성 계보 및 할당 워커 매핑 관리 레포지토리."""
+
 # 전역 가상 자산 관리 변수
 virtual_budget = 10.0  # 초기 예산 $10.0달러 (현실적인 AWS 요율과 밸런싱을 맞추기 위해 10.0달러로 조정)
 """float: 현재 사용 가능한 가상 잔여 예산 ($)."""

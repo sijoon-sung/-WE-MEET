@@ -187,7 +187,7 @@ class QLearningAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.decay_rate)
 
-    def calculate_reward(self, success, execution_time, worker_type, delay_time, deadline_exceeded):
+    def calculate_reward(self, success, execution_time, worker_type, delay_time, deadline_exceeded, current_model=None, co_scheduled_models=None):
         """
         보상 함수(Reward Function) 수식 모델 구현.
 
@@ -197,6 +197,8 @@ class QLearningAgent:
             worker_type (str): 연산에 사용된 워커 타입 ("on_demand" / "spot_a").
             delay_time (float): SLA 마감 기한 초과 지연 시간.
             deadline_exceeded (bool): SLA 데드라인 초과 여부.
+            current_model (str, optional): 현재 배치된 모델명.
+            co_scheduled_models (list, optional): 함께 배치된 모델명 리스트.
 
         Returns:
             float: 산출된 보상(Reward) 스칼라 값.
@@ -219,6 +221,20 @@ class QLearningAgent:
         # 3. 지연 페널티 (SLA 마감 기한 초과 시 초당 페널티 감점)
         if deadline_exceeded:
             reward -= self.DELAY_PENALTY_WEIGHT * delay_time
+            
+        # 4. 이종 모형 융합 배치 (Co-scheduling) 조화도에 따른 보상/페널티 추가 (자율 융합 유도)
+        if current_model and co_scheduled_models:
+            is_current_mem_bound = current_model.upper() in ["RNN", "LSTM"]
+            
+            for other_model in co_scheduled_models:
+                is_other_mem_bound = other_model.upper() in ["RNN", "LSTM"]
+                
+                # 서로 다른 리소스 성격(컴퓨트 바운드 CNN vs 메모리 바운드 RNN/LSTM)이 융합 탑재된 경우 가산 보상
+                if is_current_mem_bound != is_other_mem_bound:
+                    reward += 0.15
+                else:
+                    # 동일 리소스 성격이 편중되어 자원 경합을 유발한 경우 페널티 감점
+                    reward -= 0.20
             
         return reward
 

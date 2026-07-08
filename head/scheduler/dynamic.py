@@ -36,8 +36,9 @@ def run_dynamic_scheduler_step(MAX_SPOT_SCALE, scale_in_timer, run_task_on_worke
         with gcs_state.queue_lock:
             has_lstm = any(t.get("model_type") == "LSTM" for t in gcs_state.task_queue)
             
-        # 평균 리소스 부하가 심각하거나 LSTM 모형이 포함된 경우 고성능 Spot-A를, 그렇지 않으면 Spot-B를 동적 선택
-        target_type = "spot_a" if (avg_cpu > 75.0 or avg_mem > 70.0 or has_lstm) else "spot_b"
+        # 메모리 부족(OOM) 방지를 위해, 메모리가 많이 필요한 경우(avg_mem > 70.0 or has_lstm)에만 Spot-A(1GB)를 투입하고,
+        # 일반적인 부하(CPU 적체, CNN 등) 상황에서는 가성비가 높은 Spot-B(512MB)를 적극 선택합니다.
+        target_type = "spot_a" if (avg_mem > 70.0 or has_lstm) else "spot_b"
             
         # 대기 큐에 작업이 3개 이상 밀렸거나 평균 리소스 부하가 높을 시 스케일아웃
         if q_len_real >= 8 and spot_scale < MAX_SPOT_SCALE - 1:

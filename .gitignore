@@ -25,6 +25,7 @@ data/*.bak*
 data/*.warmstart*
 
 
-# simulation 코드 및 데모 임시 데이터 제외
-wemeet/simulation/
+# 개인 실험 코드 및 데모 임시 데이터 제외
+wemeet/simulation/fast_sim.py
+wemeet/simulation/benchmark.py
 demo_data/
